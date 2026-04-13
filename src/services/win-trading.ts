@@ -121,17 +121,28 @@ export async function buyToken(
         const book = await client.getOrderBook(tokenId);
         const maxPrice = tradingEnv.MAX_BUY_PRICE;
         let availableVolume = 0;
+        
+        // Verbose Diagnostic Log
+        const bestAsk = book.asks.length > 0 ? book.asks[0].price : "N/A";
+        const bestAskSize = book.asks.length > 0 ? book.asks[0].size : "N/A";
+        logger.info(`[CLOB FETCH] Fetched orderbook for DOWN (${shortId(tokenId)}). Best Ask: ${bestAsk} (Size: ${bestAskSize}). Max Price: ${maxPrice.toFixed(2)}`);
+
         for (const ask of book.asks) {
           const price = parseFloat(ask.price);
+          const size = parseFloat(ask.size);
           if (price <= maxPrice) {
-            availableVolume += parseFloat(ask.size) * price;
+            // Note: depth is volume in USDC = size * price
+            availableVolume += size * price;
           } else {
+            // Asks are sorted ASC, so we can break early
             break;
           }
         }
         
+        logger.info(`[CLOB DEPTH] Total available volume <= ${maxPrice.toFixed(2)}: $${availableVolume.toFixed(2)}`);
+
         if (availableVolume < targetAmount) {
-          if (availableVolume < 1.0) { // Minimum threshold
+          if (availableVolume < 1.0) { // Minimum readable threshold
             logger.warn(`Liquidity Guard: Depth too thin ($${availableVolume.toFixed(2)} available). ABORTING.`);
             sendOrderResult("FAILED", `Liquidity Guard: Total volume below $${maxPrice.toFixed(2)} is only $${availableVolume.toFixed(2)}. Aborting to prevent slippage.`);
             return false;
@@ -140,7 +151,7 @@ export async function buyToken(
           targetAmount = Math.floor(availableVolume * 100) / 100;
         }
       } catch (err) {
-        logger.warn("Liquidity Guard: Could not fetch depth, proceeding with caution.");
+        logger.warn(`Liquidity Guard Error: Could not fetch depth for ${shortId(tokenId)}. Proceeding with caution. ${err}`);
       }
 
       const shares = targetAmount / currentPrice;

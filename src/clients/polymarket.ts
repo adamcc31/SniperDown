@@ -7,6 +7,7 @@ const CLOB_BOOK_URL = "https://clob.polymarket.com/book";
 const CLOB_MIDPOINTS_URL = "https://clob.polymarket.com/midpoints";
 
 import type { GammaEvent, MarketInfo } from "../types";
+import { logger } from "../logger";
 
 export interface OrderBook {
   bids: Array<{ price: string; size: string }>;
@@ -100,6 +101,7 @@ export class PolymarketClient {
         : clobTokenIds.map((x) => String(x));
       upTokenId = ids[0] || null;
       downTokenId = ids[1] || null;
+      logger.info(`Resolved Token IDs for ${event.slug}: UP=${upTokenId}, DOWN=${downTokenId}`);
     }
 
     return {
