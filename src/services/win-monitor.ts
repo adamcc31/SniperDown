@@ -16,6 +16,9 @@ import type { RealtimePriceService } from "./realtime-price-service";
 import { sendActionAborted } from "./telegram-reporter";
 import { getClobClient } from "../providers/clobclient";
 import { scheduleResolutionFallback } from "./resolution-fallback";
+import { regimeFilter } from "./regime-filter";
+import { getProxyWalletBalanceUsd, getDynamicBuyAmount } from "../utils/balance";
+import { getDailyStartingBalance } from "./paper-ledger";
 
 function getSlugPrefix(): string {
   let raw = tradingEnv.POLYMARKET_SLUG_PREFIX || "";
@@ -41,6 +44,23 @@ export class WinMonitor {
   async processCycle(): Promise<void> {
     const enabled = await store.getEnabled();
     if (!enabled) return;
+
+    // ALGORITHMIC CIRCUIT BREAKER
+    const clob = await getClobClient();
+    const { balanceUsd } = await getProxyWalletBalanceUsd(clob);
+    const dailyStartBalance = getDailyStartingBalance();
+    
+    if (regimeFilter.checkCircuitBreaker(balanceUsd, dailyStartBalance)) {
+      logger.stop("CIRCUIT BREAKER TRIGGERED. SHUTTING DOWN.");
+      process.exit(1);
+    }
+
+    // REGIME COOLDOWN CHECK
+    if (regimeFilter.isPaused()) {
+      const remaining = regimeFilter.getCooldownRemainingMinutes();
+      logger.skip(`Regime Filter: Bot is PAUSED. Cooldown remaining: ${remaining} mins.`);
+      return;
+    }
 
     const slugPrefix = getSlugPrefix();
     if (!slugPrefix?.trim()) {
@@ -102,7 +122,9 @@ export class WinMonitor {
     const maxBuyPrice = tradingEnv.MAX_BUY_PRICE;
     const stopLossPrice = tradingEnv.STOP_LOSS_PRICE;
     const profitLockPrice = tradingEnv.PROFIT_LOCK_PRICE;
-    const buyAmountUsd = tradingEnv.BUY_AMOUNT_USD;
+    
+    // DYNAMIC POSITION SIZING
+    const buyAmountUsd = getDynamicBuyAmount(balanceUsd);
 
     let position = await store.getPosition(marketInfo.conditionId);
     const downShares = getHoldings(marketInfo.conditionId, marketInfo.downTokenId!);
@@ -114,15 +136,17 @@ export class WinMonitor {
     if (now - this.lastEvalPrintAt >= 4000) {
       this.lastEvalPrintAt = now;
       let actionTxt = "Waiting...";
-      if (mayBuy && downPrice >= triggerPrice && downPrice <= maxBuyPrice) {
-        actionTxt = "EXECUTING MOCK BUY!";
+      if (buyAmountUsd <= 0) {
+        actionTxt = "EQUITY TOO LOW (<$10)";
+      } else if (mayBuy && downPrice >= triggerPrice && downPrice <= maxBuyPrice) {
+        actionTxt = `EXECUTING MOCK BUY ($${buyAmountUsd.toFixed(2)})!`;
       } else if (!mayBuy) {
         actionTxt = "Position Active // Locked";
       }
-      logger.info(`[EVAL] DOWN Price: ${downPrice.toFixed(3)} | Target: ${triggerPrice}-${maxBuyPrice} | Action: ${actionTxt}`);
+      logger.info(`[EVAL] DOWN Price: ${downPrice.toFixed(3)} | Size: $${buyAmountUsd.toFixed(2)} | Target: ${triggerPrice}-${maxBuyPrice} | Action: ${actionTxt}`);
     }
 
-    if (mayBuy) {
+    if (mayBuy && buyAmountUsd > 0) {
       if (downPrice >= triggerPrice && downPrice > 0 && downPrice <= maxBuyPrice) {
         logger.info(`Win: Down price ${downPrice.toFixed(3)} in [${triggerPrice}, ${maxBuyPrice}], buying Down (once per market)`);
         const ok = await buyToken(

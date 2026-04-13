@@ -6,3 +6,6 @@ src/data/token-holding.json
 src/data/win-bot-state.json
 log/
 *.log
+future_improvement_notes
+docs/
+dataset/

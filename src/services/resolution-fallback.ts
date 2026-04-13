@@ -18,6 +18,7 @@ import { addPaperBalance, recordMockTrade, recordMockWin, recordMockLoss } from 
 import { sendExpirationSettlement } from "./telegram-reporter";
 import { logger, shortId } from "../logger";
 import * as store from "../utils/file-store";
+import { regimeFilter } from "./regime-filter";
 
 const RESOLUTION_DELAY_MS = 60_000;     // Wait 60s for Polymarket API to finalize
 const MAX_RESOLUTION_RETRIES = 5;
@@ -100,6 +101,7 @@ async function resolveExpiredMarket(
         );
         recordMockTrade();
         recordMockLoss();
+        regimeFilter.recordLoss();
         clearMarketHoldings(conditionId);
         await store.setPosition(conditionId, null);
         sendExpirationSettlement("LOSS", totalShares, 0, conditionId);
@@ -114,6 +116,7 @@ async function resolveExpiredMarket(
         addPaperBalance(payout);
         recordMockTrade();
         recordMockWin();
+        regimeFilter.recordWin();
         logger.ok(
           `Resolution Fallback: ${shortId(conditionId)} → DOWN WON. ` +
           `Added $${payout.toFixed(2)} (${totalShares.toFixed(2)} shares × $1.00)`
@@ -123,6 +126,7 @@ async function resolveExpiredMarket(
         // DOWN lost — no payout. Cost was already deducted at buy time.
         recordMockTrade();
         recordMockLoss();
+        regimeFilter.recordLoss();
         logger.warn(
           `Resolution Fallback: ${shortId(conditionId)} → DOWN LOST. ` +
           `${totalShares.toFixed(2)} shares worthless. No balance adjustment.`
@@ -146,6 +150,7 @@ async function resolveExpiredMarket(
         logger.warn(`Resolution Fallback: Exhausted retries for ${shortId(conditionId)}. Force-settling as LOSS.`);
         recordMockTrade();
         recordMockLoss();
+        regimeFilter.recordLoss();
         clearMarketHoldings(conditionId);
         await store.setPosition(conditionId, null);
         sendExpirationSettlement("LOSS", totalShares, 0, conditionId);

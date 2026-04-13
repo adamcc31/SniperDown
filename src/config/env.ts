@@ -93,6 +93,9 @@ export const tradingEnv = {
   get TG_CHAT_ID(): string {
     return process.env.TG_CHAT_ID || "";
   },
+  get MAX_DAILY_DRAWDOWN_PERCENT(): number {
+    return parseNum(process.env.MAX_DAILY_DRAWDOWN_PERCENT, 0.10);
+  },
 };
 
 export function getRpcUrl(chainId: number): string {

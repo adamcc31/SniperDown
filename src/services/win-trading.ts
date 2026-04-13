@@ -15,10 +15,12 @@ import { validateBuyOrderBalance } from "../utils/balance";
 import { tradingEnv } from "../config/env";
 import { logger, shortId } from "../logger";
 import type { MarketInfo } from "../types";
+import * as store from "../utils/file-store";
 import { existsSync, mkdirSync, appendFileSync } from "fs";
 import { resolve } from "path";
 import { sendOrderExecution, sendOrderResult } from "./telegram-reporter";
 import { addPaperBalance, deductPaperBalance, recordMockTrade, recordMockWin, recordMockLoss } from "./paper-ledger";
+import { regimeFilter } from "./regime-filter";
 
 const TICK_SIZE = tradingEnv.TICK_SIZE;
 const NEG_RISK = tradingEnv.NEG_RISK;
@@ -112,8 +114,37 @@ export async function buyToken(
       }
       const buffer = tradingEnv.BUY_PRICE_BUFFER;
       const orderPrice = clampPrice(Math.min(0.99, currentPrice * (1 + buffer)));
-      const shares = amountUsd / currentPrice;
-      const { valid } = await validateBuyOrderBalance(client, amountUsd);
+      
+      // PRE-ENTRY ORDERBOOK DEPTH CHECK (Liquidity Guard)
+      let targetAmount = amountUsd;
+      try {
+        const book = await client.getOrderBook(tokenId);
+        const maxPrice = tradingEnv.MAX_BUY_PRICE;
+        let availableVolume = 0;
+        for (const ask of book.asks) {
+          const price = parseFloat(ask.price);
+          if (price <= maxPrice) {
+            availableVolume += parseFloat(ask.size) * price;
+          } else {
+            break;
+          }
+        }
+        
+        if (availableVolume < targetAmount) {
+          if (availableVolume < 1.0) { // Minimum threshold
+            logger.warn(`Liquidity Guard: Depth too thin ($${availableVolume.toFixed(2)} available). ABORTING.`);
+            sendOrderResult("FAILED", `Liquidity Guard: Total volume below $${maxPrice.toFixed(2)} is only $${availableVolume.toFixed(2)}. Aborting to prevent slippage.`);
+            return false;
+          }
+          logger.info(`Liquidity Guard: Capping order from $${targetAmount.toFixed(2)} to $${availableVolume.toFixed(2)}.`);
+          targetAmount = Math.floor(availableVolume * 100) / 100;
+        }
+      } catch (err) {
+        logger.warn("Liquidity Guard: Could not fetch depth, proceeding with caution.");
+      }
+
+      const shares = targetAmount / currentPrice;
+      const { valid } = await validateBuyOrderBalance(client, targetAmount);
       if (!valid) {
         logger.skip("Buy: insufficient balance/allowance");
         return false;
@@ -121,22 +152,21 @@ export async function buyToken(
       const order = {
         tokenID: tokenId,
         side: Side.BUY,
-        amount: amountUsd,
+        amount: targetAmount,
         price: orderPrice,
       };
-      logger.buy(`BUY ${side}: $${amountUsd.toFixed(2)} @ ${orderPrice.toFixed(3)} (ref ${currentPrice.toFixed(3)} +${(buffer * 100).toFixed(0)}%)`);
-      logTrade(`BUY conditionId=${shortId(marketInfo.conditionId)} eventSlug=${marketInfo.eventSlug} side=${side} tokenId=${shortId(tokenId)} amountUsd=${amountUsd} price=${orderPrice.toFixed(4)}`);
-      sendOrderExecution(side, "BUY Market (FAK)", orderPrice, amountUsd);
+      logger.buy(`BUY ${side}: $${targetAmount.toFixed(2)} @ ${orderPrice.toFixed(3)} (ref ${currentPrice.toFixed(3)} +${(buffer * 100).toFixed(0)}%)`);
+      logTrade(`BUY conditionId=${shortId(marketInfo.conditionId)} eventSlug=${marketInfo.eventSlug} side=${side} tokenId=${shortId(tokenId)} amountUsd=${targetAmount} price=${orderPrice.toFixed(4)}`);
+      sendOrderExecution(side, "BUY Market (FAK)", orderPrice, targetAmount);
 
       let result: { status?: string; makingAmount?: string; takingAmount?: string };
-      let finalExecutedUsdValue = amountUsd; // for correct TG PnL math
-
+      
       try {
         if (tradingEnv.DRY_RUN_MODE) {
-           deductPaperBalance(amountUsd);
+           deductPaperBalance(targetAmount);
            recordMockTrade();
-           logger.info(`DRY RUN: Simulating FAK Buy Hit. Deducted $${amountUsd.toFixed(2)} from Paper Balance.`);
-           result = { status: "FILLED", takingAmount: String(shares) }; // Math fix: give exactly shares matched
+           logger.info(`DRY RUN: Simulating FAK Buy Hit. Deducted $${targetAmount.toFixed(2)} from Paper Balance.`);
+           result = { status: "FILLED", takingAmount: String(shares) }; 
         } else {
            result = await runWithoutClobRequestLog(() =>
              (client.createAndPostMarketOrder as (o: unknown, opt: unknown, t: string) => Promise<unknown>)(
@@ -248,19 +278,28 @@ export async function sellToken(
       if (tradingEnv.DRY_RUN_MODE) {
           // PnL Fix: Shares Owned * Execution Price
           const mockGain = shares * sellPrice; 
+          const position = await store.getPosition(conditionId);
+          const cost = position ? position.buyPrice * shares : 0;
+          const realizedPnl = mockGain - cost;
+
           addPaperBalance(mockGain);
           recordMockTrade();
-          if (reason === "profit_lock") recordMockWin();
-          else if (reason === "stop_loss") recordMockLoss();
+          if (reason === "profit_lock") {
+            recordMockWin();
+            regimeFilter.recordWin();
+          } else if (reason === "stop_loss") {
+            recordMockLoss();
+            regimeFilter.recordLoss();
+          }
           
-          logger.info(`DRY RUN: Simulating FAK Sell Hit. Added $${mockGain.toFixed(2)} to Paper Balance.`);
+          logger.info(`DRY RUN: Simulating FAK Sell Hit. Added $${mockGain.toFixed(2)} to Paper Balance. Realized: $${realizedPnl.toFixed(2)}`);
           
           // Bug Fix: Infinite loop due to dust/rounding. Brutal absolute wipe requested.
           clearMarketHoldings(conditionId);
           
           logTrade(`SELL_FILLED conditionId=${shortId(conditionId)} side=${side} reason=${reason} sold=${shares.toFixed(4)}`);
           logger.ok(`SELL ${side} (${reason}): ${shares.toFixed(2)} tokens (DRY RUN)`);
-          sendOrderResult("SUCCESS", `Sold ${shares.toFixed(2)} shares of ${side} due to ${reason}. Returned $${mockGain.toFixed(2)} to balance.`);
+          sendOrderResult("SUCCESS", `Sold ${shares.toFixed(2)} shares of ${side} due to ${reason}. Returned $${mockGain.toFixed(2)} to balance.`, realizedPnl);
           return true;
       } else {
           result = await runWithoutClobRequestLog(() =>

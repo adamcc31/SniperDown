@@ -91,3 +91,18 @@ export async function validateBuyOrderBalance(
     return { valid: false, available: 0, required: requiredAmount };
   }
 }
+
+/**
+ * Tiered Position Sizing:
+ * Equity $10 - $30: Max bid = $1.00
+ * Equity $30 - $50: Max bid = $2.00
+ * Equity $50 - $75: Max bid = $4.00
+ * Equity > $75: Cap at $4.00
+ */
+export function getDynamicBuyAmount(equity: number): number {
+  if (equity < 10) return 0;
+  if (equity <= 30) return 1.00;
+  if (equity <= 50) return 2.00;
+  if (equity <= 75) return 4.00;
+  return 4.00; // Capped at $4.00 for Phase 2
+}
