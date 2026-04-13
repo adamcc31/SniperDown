@@ -16,6 +16,7 @@ import type { RealtimePriceService } from "./realtime-price-service";
 import { checkLiquidity } from "../utils/liquidity-guard";
 import { forceInstantSettlement } from "./resolution-fallback";
 import { sendOrderResult } from "./telegram-reporter";
+import * as paperLedger from "../services/paper-ledger";
 
 function getSlugPrefix(): string {
   let raw = tradingEnv.POLYMARKET_SLUG_PREFIX || "";
@@ -118,39 +119,7 @@ export class WinMonitor {
     const mayBuy = !alreadyBoughtInMarket && !hasPositionOrHoldings;
 
     if (mayBuy) {
-      if (upPrice >= triggerPrice && upPrice > 0 && upPrice <= maxBuyPrice) {
-        logger.info(`Win: Up price ${upPrice.toFixed(3)} in [${triggerPrice}, ${maxBuyPrice}], buying Up (once per market)`);
-        
-        const upLiqOk = await checkLiquidity(
-          marketInfo.upTokenId!,
-          tradingEnv.MAX_BUY_PRICE,
-          tradingEnv.BUY_AMOUNT_USD
-        );
-        if (!upLiqOk) {
-          logger.skip(`[LiquidityGuard] Insufficient volume for Up entry. Skipping cycle.`);
-          return;
-        }
-
-        const ok = await buyToken(
-          marketInfo.upTokenId!,
-          "Up",
-          buyAmountUsd,
-          marketInfo
-        );
-        if (ok) {
-          await store.markBoughtInMarket(marketInfo.conditionId);
-          const shares = getHoldings(marketInfo.conditionId, marketInfo.upTokenId!);
-          position = {
-            conditionId: marketInfo.conditionId,
-            side: "Up",
-            tokenId: marketInfo.upTokenId!,
-            buyPrice: upPrice,
-            shares,
-            boughtAt: Math.floor(Date.now() / 1000),
-          };
-          await store.setPosition(marketInfo.conditionId, position);
-        }
-      } else if (downPrice >= triggerPrice && downPrice > 0 && downPrice <= maxBuyPrice) {
+      if (downPrice >= triggerPrice && downPrice > 0 && downPrice <= maxBuyPrice) {
         logger.info(`Win: Down price ${downPrice.toFixed(3)} in [${triggerPrice}, ${maxBuyPrice}], buying Down (once per market)`);
         
         const downLiqOk = await checkLiquidity(
@@ -186,17 +155,7 @@ export class WinMonitor {
     }
 
     if (!position) {
-      if (upShares > 0.01) {
-        position = {
-          conditionId: marketInfo.conditionId,
-          side: "Up",
-          tokenId: marketInfo.upTokenId!,
-          buyPrice: 0,
-          shares: upShares,
-          boughtAt: 0,
-        };
-        await store.setPosition(marketInfo.conditionId, position);
-      } else if (downShares > 0.01) {
+      if (downShares > 0.01) {
         position = {
           conditionId: marketInfo.conditionId,
           side: "Down",
@@ -235,12 +194,19 @@ export class WinMonitor {
             getBestBid
           );
           if (ok) {
+            const realizedPnl = shares * currentPrice - costBasis;
+            
+            // Wire the paper ledger for Dry Run
+            if (tradingEnv.DRY_RUN_MODE) {
+              paperLedger.settleMockTrade(shares, currentPrice, undefined, costBasis); 
+            }
+
             sendOrderResult({
               side: position.side,
               reason,
               soldAmount: shares,
               sellPrice: currentPrice,
-              realizedPnl: shares * currentPrice - costBasis,
+              realizedPnl: realizedPnl,
               conditionId: marketInfo.conditionId,
               eventSlug: marketInfo.eventSlug,
             });
