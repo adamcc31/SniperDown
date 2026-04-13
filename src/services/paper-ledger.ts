@@ -13,16 +13,6 @@ export function getPaperBalance(): number {
   return simulated_usdc_balance;
 }
 
-export function deductPaperBalance(amount: number): number {
-  simulated_usdc_balance -= amount;
-  return simulated_usdc_balance;
-}
-
-export function addPaperBalance(amount: number): number {
-  simulated_usdc_balance += amount;
-  return simulated_usdc_balance;
-}
-
 /** Record the cost basis of the current open trade. */
 export function recordPrincipal(amount: number) {
   currentTradePrincipal = amount;
@@ -32,23 +22,45 @@ export function getPrincipal(): number {
   return currentTradePrincipal;
 }
 
-export function recordMockTrade() {
+/**
+ * Standardized Settlement Math:
+ * Realized_PnL = Gross_Return - Invested_Principal
+ * New_Sim_Balance = Old_Sim_Balance + Realized_PnL
+ */
+export function settleMockTrade(shares: number, exitPrice: number, isWin?: boolean, principalOverride?: number): { pnl: number, simBalance: number } {
+  const principal = principalOverride !== undefined ? principalOverride : currentTradePrincipal;
+  let grossReturn = 0;
+
+  if (isWin !== undefined) {
+    // Expiration logic: WIN = shares * $1.00, LOSS = $0.00
+    grossReturn = isWin ? shares * 1.00 : 0;
+  } else {
+    // Stop Loss / Profit Lock logic: shares * exit price
+    grossReturn = shares * exitPrice;
+  }
+
+  const pnl = grossReturn - principal;
+  simulated_usdc_balance += pnl;
+  
   totalMockTrades++;
-}
-
-export function recordMockWin() {
-  winCount++;
-}
-
-export function recordMockLoss() {
-  lossCount++;
+  if (pnl > 0) winCount++;
+  else if (pnl < 0) lossCount++;
+  
+  if (principalOverride === undefined) {
+    currentTradePrincipal = 0; // Only reset if we used the global principal
+  }
+  
+  return {
+    pnl,
+    simBalance: simulated_usdc_balance
+  };
 }
 
 export function getPaperStats() {
   const totalClosed = winCount + lossCount;
   const winRate = totalClosed > 0 ? (winCount / totalClosed) * 100 : 0;
   return {
-    totalMockTrades, // Legacy count
+    totalMockTrades, 
     totalClosed,
     winCount,
     lossCount,

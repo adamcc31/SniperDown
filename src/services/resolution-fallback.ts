@@ -1,164 +1,83 @@
 /**
  * Resolution Fallback Service
  * 
- * When a market expires and the WS unsubscribes to move to the next window,
- * this module handles the dangling holdings left behind.
- * 
- * Flow:
- * 1. Triggered by win-monitor when conditionId changes and old holdings exist.
- * 2. Waits 60s for Polymarket to finalize on-chain resolution.
- * 3. Queries CTF contract for winning outcome.
- * 4. Settles paper balance: WIN → shares * $1.00, LOSS → $0.00.
- * 5. Fires Telegram alert and wipes holdings.
+ * Background settlement for expired markets.
+ * Polls until WIN/LOSS is confirmed by oracle, then settles balance.
  */
 
 import { isMarketResolved } from "../utils/redeem";
-import { getAllHoldings, clearMarketHoldings } from "../utils/holdings";
-import { addPaperBalance, recordMockTrade, recordMockWin, recordMockLoss, getPrincipal, recordPrincipal } from "./paper-ledger";
-import { sendExpirationSettlement } from "./telegram-reporter";
+import { clearMarketHoldings } from "../utils/holdings";
+import { settleMockTrade } from "./paper-ledger";
+import { sendOrderResult } from "./telegram-reporter";
 import { logger, shortId } from "../logger";
 import * as store from "../utils/file-store";
 
-const RESOLUTION_DELAY_MS = 60_000;     // Wait 60s for Polymarket API to finalize
-const MAX_RESOLUTION_RETRIES = 5;
-const RETRY_INTERVAL_MS = 30_000;       // 30s between retries
+const INITIAL_POLL_DELAY_MS = 30_000;    
+const MAX_POLL_INTERVAL_MS = 600_000;   // Max 10 mins between polls
 
 /**
- * Schedule a delayed resolution check for the old market.
- * Called from WinMonitor when the conditionId changes and holdings > 0.
+ * Detached background settlement.
+ * Polls the Polymarket API until a definitive result is returned.
  */
-export function scheduleResolutionFallback(
-  oldConditionId: string,
-  downTokenId: string
-): void {
-  // Snapshot current holdings at scheduling time
-  const holdings = getAllHoldings();
-  const marketHoldings = holdings[oldConditionId];
-  if (!marketHoldings) return;
-
-  const totalShares = Object.values(marketHoldings).reduce((sum, amt) => sum + amt, 0);
-  if (totalShares <= 0) return;
-
-  logger.info(
-    `⏳ Resolution Fallback: Scheduling for ${shortId(oldConditionId)} ` +
-    `(${totalShares.toFixed(2)} shares) in ${RESOLUTION_DELAY_MS / 1000}s`
-  );
-
-  setTimeout(async () => {
-    try {
-      await resolveExpiredMarket(oldConditionId, downTokenId);
-    } catch (err) {
-      logger.error(`Resolution Fallback fatal error: ${err instanceof Error ? err.message : String(err)}`);
-    }
-  }, RESOLUTION_DELAY_MS);
-}
-
-/**
- * Attempt to resolve an expired market with retries.
- * Determines WIN/LOSS for held DOWN tokens, settles balance, fires TG alert.
- */
-async function resolveExpiredMarket(
+export async function forceInstantSettlement(
   conditionId: string,
-  _downTokenId: string
+  shares: number,
+  principalToRedeem: number
 ): Promise<void> {
-  for (let attempt = 1; attempt <= MAX_RESOLUTION_RETRIES; attempt++) {
-    // Re-check holdings — auto-redeem may have already handled it
-    const currentHoldings = getAllHoldings();
-    const marketHoldings = currentHoldings[conditionId];
-    if (!marketHoldings) {
-      logger.info(`Resolution Fallback: ${shortId(conditionId)} holdings already cleared. Skipping.`);
-      return;
-    }
-    const totalShares = Object.values(marketHoldings).reduce((sum, amt) => sum + amt, 0);
-    if (totalShares <= 0) {
-      logger.info(`Resolution Fallback: ${shortId(conditionId)} shares = 0. Skipping.`);
-      clearMarketHoldings(conditionId);
-      return;
-    }
+  if (shares <= 0 || principalToRedeem <= 0) {
+    logger.skip(`Background Settlement skipped for ${shortId(conditionId)}: No shares/principal.`);
+    return;
+  }
 
+  logger.info(`🔄 Background Settlement Started: ${shortId(conditionId)} (${shares.toFixed(2)} shares, principal: $${principalToRedeem.toFixed(2)})`);
+
+  let pollDelay = INITIAL_POLL_DELAY_MS;
+  let attempt = 1;
+
+  while (true) {
     try {
-      logger.info(
-        `Resolution Fallback: Checking ${shortId(conditionId)} ` +
-        `(attempt ${attempt}/${MAX_RESOLUTION_RETRIES}, ${totalShares.toFixed(2)} shares)`
-      );
-
       const { isResolved, winningIndexSets } = await isMarketResolved(conditionId);
 
-      if (!isResolved) {
-        if (attempt < MAX_RESOLUTION_RETRIES) {
-          logger.info(
-            `Resolution Fallback: ${shortId(conditionId)} not yet resolved. ` +
-            `Retrying in ${RETRY_INTERVAL_MS / 1000}s...`
-          );
-          await new Promise(r => setTimeout(r, RETRY_INTERVAL_MS));
-          continue;
-        }
-        // Final attempt — force LOSS settlement to prevent permanently dangling holdings
-        logger.warn(
-          `Resolution Fallback: ${shortId(conditionId)} still unresolved after ` +
-          `${MAX_RESOLUTION_RETRIES} attempts. Force-settling as LOSS.`
+      if (isResolved) {
+        // DOWN token = clobTokenIds[1] = outcome slot 1 = indexSet 2
+        const downWon = winningIndexSets?.includes(2) ?? false;
+        const outcome = downWon ? "WIN" : "LOSS";
+        
+        const { pnl } = settleMockTrade(shares, 0, downWon, principalToRedeem);
+        
+        logger.ok(
+          `Resolution Confirmed: ${shortId(conditionId)} → ${outcome}. ` +
+          `Principal: $${principalToRedeem.toFixed(2)}, PnL: $${pnl.toFixed(2)}`
         );
-        recordMockLoss();
+
+        // Final Telegram Alert
+        await sendOrderResult(
+          `EXPIRATION_${outcome}`,
+          pnl,
+          `Market ${shortId(conditionId)} settled via Oracle.\noutcome=${outcome}\nshares=${shares.toFixed(2)}`
+        );
+        
+        // Final State Cleanup
         clearMarketHoldings(conditionId);
         await store.setPosition(conditionId, null);
-        recordPrincipal(0); // Clear principal
-        await sendExpirationSettlement("LOSS", totalShares, 0, conditionId);
         return;
       }
 
-      // DOWN token = clobTokenIds[1] = outcome slot 1 = indexSet 2
-      const downWon = winningIndexSets?.includes(2) ?? false;
-
-      if (downWon) {
-        const principal = getPrincipal();
-        const payout = totalShares * 1.00;
-        const pnl = payout - principal;
-        
-        addPaperBalance(pnl);
-        recordMockTrade();
-        recordMockWin();
-        logger.ok(
-          `Resolution Fallback: ${shortId(conditionId)} → DOWN WON. ` +
-          `PnL: $${pnl.toFixed(2)} (${totalShares.toFixed(2)} shares @ $1.00)`
-        );
-        recordPrincipal(0); // Clear principal
-        await sendExpirationSettlement("WIN", totalShares, payout, conditionId);
-      } else {
-        // DOWN lost — no payout. 
-        const principal = getPrincipal();
-        const pnl = 0 - principal;
-        
-        addPaperBalance(pnl); // Deduct the lost principal from balance at this point
-        recordMockTrade();
-        recordMockLoss();
-        logger.warn(
-          `Resolution Fallback: ${shortId(conditionId)} → DOWN LOST. ` +
-          `PnL: $${pnl.toFixed(2)} (${totalShares.toFixed(2)} shares worthless).`
-        );
-        recordPrincipal(0); // Clear principal
-        await sendExpirationSettlement("LOSS", totalShares, 0, conditionId);
-      }
-
-      clearMarketHoldings(conditionId);
-      await store.setPosition(conditionId, null);
-      return;
+      // Not resolved yet, wait and retry with exponential backoff
+      logger.info(`Settlement pending for ${shortId(conditionId)} (attempt ${attempt}). Retrying in ${pollDelay/1000}s...`);
+      await new Promise(r => setTimeout(r, pollDelay));
+      
+      attempt++;
+      pollDelay = Math.min(pollDelay * 1.5, MAX_POLL_INTERVAL_MS);
 
     } catch (err) {
-      logger.error(
-        `Resolution Fallback error (attempt ${attempt}): ` +
-        `${err instanceof Error ? err.message : String(err)}`
-      );
-      if (attempt < MAX_RESOLUTION_RETRIES) {
-        await new Promise(r => setTimeout(r, RETRY_INTERVAL_MS));
-      } else {
-        // Exhaust retries — force LOSS settlement
-        logger.warn(`Resolution Fallback: Exhausted retries for ${shortId(conditionId)}. Force-settling as LOSS.`);
-        recordMockLoss();
-        clearMarketHoldings(conditionId);
-        await store.setPosition(conditionId, null);
-        recordPrincipal(0); // Clear principal
-        await sendExpirationSettlement("LOSS", totalShares, 0, conditionId);
-      }
+      logger.error(`Settlement Polling Error for ${shortId(conditionId)}: ${err instanceof Error ? err.message : String(err)}`);
+      await new Promise(r => setTimeout(r, pollDelay));
     }
   }
+}
+
+/** Legacy hook maintained for basic export mapping if needed. */
+export function scheduleResolutionFallback(oldConditionId: string, dt: string): void {
+  // Now handled directly by WinMonitor calling forceInstantSettlement
 }

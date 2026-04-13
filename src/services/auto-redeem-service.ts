@@ -10,7 +10,7 @@ import { getEventSlug } from "../utils/file-store";
 import { existsSync, mkdirSync, appendFileSync } from "fs";
 import { resolve } from "path";
 import { sendClaimedPrize, sendExpirationSettlement } from "./telegram-reporter";
-import { addPaperBalance, recordMockWin, recordMockLoss } from "./paper-ledger";
+import { settleMockTrade, getPrincipal } from "./paper-ledger";
 
 const REDEEM_INTERVAL_MS = 160 * 1000;
 const LOG_DIR = resolve(process.cwd(), "log");
@@ -44,15 +44,14 @@ async function checkAndRedeemPositions(): Promise<void> {
       try {
         if (tradingEnv.DRY_RUN_MODE) {
           const downWon = winningIndexSets?.includes(2) ?? false;
+          const principal = getPrincipal();
+          const { pnl } = settleMockTrade(totalAmount, 0, downWon);
+          
           if (downWon) {
-            const payoutUsd = totalAmount * 1.00;
-            addPaperBalance(payoutUsd);
-            recordMockWin();
-            logger.info(`DRY RUN: Simulating redeem of ${shortId(conditionId)}. Added $${payoutUsd.toFixed(2)} to Paper Ledger.`);
-            sendExpirationSettlement("WIN", totalAmount, payoutUsd, conditionId);
+            logger.info(`DRY RUN: Simulating redeem of ${shortId(conditionId)}. Added $${pnl.toFixed(2)} to Paper Ledger.`);
+            sendExpirationSettlement("WIN", totalAmount, totalAmount, conditionId);
           } else {
-            recordMockLoss();
-            logger.warn(`DRY RUN: Redeem simulated. ${shortId(conditionId)} tokens LOST. No balance adjusted.`);
+            logger.warn(`DRY RUN: Redeem simulated. ${shortId(conditionId)} tokens LOST. PnL: $${pnl.toFixed(2)}`);
             sendExpirationSettlement("LOSS", totalAmount, 0, conditionId);
           }
           clearMarketHoldings(conditionId);

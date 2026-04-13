@@ -9,14 +9,14 @@ import { buyToken, sellToken } from "./win-trading";
 import { getWindowSecondsFromSlug } from "../config/env";
 import { tradingEnv } from "../config/env";
 import { logger } from "../logger";
-import { getHoldings } from "../utils/holdings";
+import { getHoldings, getAllHoldings, clearMarketHoldings } from "../utils/holdings";
 import * as store from "../utils/file-store";
 import type { WinPosition, MarketInfo } from "../types";
 import type { RealtimePriceService } from "./realtime-price-service";
 import { sendActionAborted } from "./telegram-reporter";
 import { getClobClient } from "../providers/clobclient";
-import { scheduleResolutionFallback } from "./resolution-fallback";
-import { getAllHoldings } from "../utils/holdings";
+import { forceInstantSettlement } from "./resolution-fallback";
+import { getPrincipal } from "./paper-ledger";
 import { shortId } from "../logger";
 
 function getSlugPrefix(): string {
@@ -67,15 +67,23 @@ export class WinMonitor {
       if (this.lastConditionId) {
          logger.info(`🔄 Market Change Detected: ${shortId(this.lastConditionId)} -> ${shortId(marketInfo.conditionId)}`);
          
-         // Fix: Check for dangling holdings in the old market before switching focus
-         const oldHoldings = getHoldings(this.lastConditionId, ""); // Check any token in old market
+         // User Directive: Non-blocking Background Settlement
          const allH = getAllHoldings();
-         const hasOld = allH[this.lastConditionId] && Object.values(allH[this.lastConditionId]).some(v => v > 0);
+         const oldMarketHoldings = allH[this.lastConditionId];
+         const shares = oldMarketHoldings ? Object.values(oldMarketHoldings).reduce((sum, val) => sum + val, 0) : 0;
          
-         if (hasOld) {
-            logger.warn(`⚠️ Exiting market ${shortId(this.lastConditionId)} with active holdings! Triggering settlement.`);
-            // Pass the old conditionId and old downTokenId if we had it, but scheduleResolutionFallback handles it.
-            scheduleResolutionFallback(this.lastConditionId, ""); 
+         if (shares > 0 && this.lastConditionId) {
+            logger.warn(`⚠️ Exiting market ${shortId(this.lastConditionId)} with ${shares.toFixed(2)} active holdings! Triggering background settlement.`);
+            const principal = getPrincipal();
+            
+            // Fire-and-forget: Detached promise poller
+            forceInstantSettlement(this.lastConditionId!, shares, principal).catch(err => {
+               logger.error(`Background Settlement Error for ${shortId(this.lastConditionId!)}: ${err}`);
+            });
+
+            // Immediate state wipe to allow instant switch to new market focus
+            clearMarketHoldings(this.lastConditionId);
+            store.setPosition(this.lastConditionId, null).catch(() => {});
          }
       }
       this.lastConditionId = marketInfo.conditionId;

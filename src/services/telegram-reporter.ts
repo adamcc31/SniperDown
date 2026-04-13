@@ -38,19 +38,33 @@ export async function sendHeartbeat() {
   await _callTelegramApi(`⏱️ *Sniper Heartbeat*\nMarket: \`${tradingEnv.POLYMARKET_SLUG_PREFIX}\`\nStatus: Scanning for targets...`);
 }
 
-export async function sendOrderExecution(direction: string, type: string, price: number, amountUsd: number) {
+export async function sendOrderExecution(direction: string, type: string, price: number, amountUsd: number, shares: number) {
   const simulatedStr = tradingEnv.DRY_RUN_MODE ? " 👻 [DRY RUN]" : "";
-  await _callTelegramApi(`⚡ *Order Execution Triggered*${simulatedStr}\nType: ${type}\nDirection: ${direction}\nAmount: $${amountUsd.toFixed(2)}\nRef Price: $${price.toFixed(3)}\nMarket: \`${tradingEnv.POLYMARKET_SLUG_PREFIX}\``);
+  await _callTelegramApi(
+    `⚡ *Order Execution Triggered*${simulatedStr}\n` +
+    `Type: ${type}\n` +
+    `Direction: ${direction}\n` +
+    `Amount: $${amountUsd.toFixed(2)}\n` +
+    `Fill Price: $${price.toFixed(3)}\n` +
+    `Shares Received: ${shares.toFixed(2)}\n` +
+    `Market: \`${tradingEnv.POLYMARKET_SLUG_PREFIX}\``
+  );
 }
 
 import { getPaperStats } from "./paper-ledger";
 
-export async function sendOrderResult(status: string, reasonDetails: string = "") {
+export async function sendOrderResult(outcome: string, realizedPnl: number, details: string = "") {
   let simulatedStr = "";
   if (tradingEnv.DRY_RUN_MODE) {
     simulatedStr = ` 👻 [DRY RUN]`;
   }
-  await _callTelegramApi(`✅ *Order Result*${simulatedStr}\nStatus: ${status}\nDetails: ${reasonDetails}`);
+  const emoji = realizedPnl >= 0 ? "✅" : "❌";
+  await _callTelegramApi(
+    `${emoji} *Order Result*${simulatedStr}\n` +
+    `Outcome: *${outcome}*\n` +
+    `Realized PnL: *${realizedPnl >= 0 ? "+" : ""}$${realizedPnl.toFixed(2)}*\n` +
+    `Details: ${details}`
+  );
 }
 
 export async function sendClaimedPrize(amountUsd: number) {
