@@ -120,8 +120,14 @@ export class WinMonitor {
     const mayBuy = !alreadyBoughtInMarket && !hasPositionOrHoldings;
 
     if (mayBuy) {
+      const currentTime = Math.floor(Date.now() / 1000);
+      const ttrSeconds = Number(marketInfo.endTime) - currentTime;
+      if (ttrSeconds > tradingEnv.MAX_TTR_SECONDS || ttrSeconds < tradingEnv.MIN_TTR_SECONDS) {
+        return;
+      }
+
       if (downPrice >= triggerPrice && downPrice > 0 && downPrice <= maxBuyPrice) {
-        logger.info(`Win: Down price ${downPrice.toFixed(3)} in [${triggerPrice}, ${maxBuyPrice}], buying Down (once per market)`);
+        logger.info(`Win: Down price ${downPrice.toFixed(3)}, TTR: ${ttrSeconds}s (Golden Window), buying Down`);
         
         const downLiqOk = await checkLiquidity(
           marketInfo.downTokenId!,

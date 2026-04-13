@@ -74,6 +74,12 @@ export const tradingEnv = {
   get BUY_AMOUNT_USD(): number {
     return parseNum(process.env.BUY_AMOUNT_USD, 5);
   },
+  get MAX_TTR_SECONDS(): number {
+    return parseNum(process.env.MAX_TTR_SECONDS, 150);
+  },
+  get MIN_TTR_SECONDS(): number {
+    return parseNum(process.env.MIN_TTR_SECONDS, 90);
+  },
   /** Extra % above reported price for buy (so FAK crosses spread). e.g. 0.03 = 3% */
   get BUY_PRICE_BUFFER(): number {
     return parseNum(process.env.BUY_PRICE_BUFFER, 0.03);
