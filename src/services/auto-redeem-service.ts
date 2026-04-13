@@ -65,18 +65,7 @@ async function checkAndRedeemPositions(): Promise<void> {
           errorMsg.includes("You don't have any tokens") ||
           errorMsg.includes("No tokens to redeem")
         ) {
-          const eventSlug = await getEventSlug(conditionId);
           clearMarketHoldings(conditionId);
-          
-          const principal = await store.getInvestedPrincipal(conditionId) ?? 0;
-          sendOrderResult({
-            side: "redeem",
-            reason: "settlement",
-            realizedPnl: -principal,
-            isWin: false,
-            conditionId,
-            eventSlug: eventSlug ?? "",
-          });
         } else {
           logger.error(`Redemption failed: ${errorMsg}`);
         }
