@@ -9,8 +9,8 @@ import { logger, shortId } from "../logger";
 import { getEventSlug } from "../utils/file-store";
 import { existsSync, mkdirSync, appendFileSync } from "fs";
 import { resolve } from "path";
-import { sendClaimedPrize } from "./telegram-reporter";
-import { addPaperBalance, recordMockWin } from "./paper-ledger";
+import { sendClaimedPrize, sendExpirationSettlement } from "./telegram-reporter";
+import { addPaperBalance, recordMockWin, recordMockLoss } from "./paper-ledger";
 
 const REDEEM_INTERVAL_MS = 160 * 1000;
 const LOG_DIR = resolve(process.cwd(), "log");
@@ -42,24 +42,33 @@ async function checkAndRedeemPositions(): Promise<void> {
       logger.redeem(`${shortId(conditionId)} resolved, winning: ${winningIndexSets?.join(", ")}`);
 
       try {
-        const payoutUsd = totalAmount * 1.00;
         if (tradingEnv.DRY_RUN_MODE) {
-          addPaperBalance(payoutUsd); // Win = shares * 1.00
-          recordMockWin();
-          logger.info(`DRY RUN: Simulating redeem of ${shortId(conditionId)}. Added $${payoutUsd.toFixed(2)} to Paper Ledger.`);
-        } else {
-          await redeemMarket(conditionId);
+          const downWon = winningIndexSets?.includes(2) ?? false;
+          if (downWon) {
+            const payoutUsd = totalAmount * 1.00;
+            addPaperBalance(payoutUsd);
+            recordMockWin();
+            logger.info(`DRY RUN: Simulating redeem of ${shortId(conditionId)}. Added $${payoutUsd.toFixed(2)} to Paper Ledger.`);
+            sendExpirationSettlement("WIN", totalAmount, payoutUsd, conditionId);
+          } else {
+            recordMockLoss();
+            logger.warn(`DRY RUN: Redeem simulated. ${shortId(conditionId)} tokens LOST. No balance adjusted.`);
+            sendExpirationSettlement("LOSS", totalAmount, 0, conditionId);
+          }
+          clearMarketHoldings(conditionId);
+          continue;
         }
+
+        // Live mode redeem logic continues below
+        const payoutUsd = totalAmount * 1.00;
+        await redeemMarket(conditionId);
         
         const eventSlug = await getEventSlug(conditionId);
         logRedeem(`REDEEM conditionId=${shortId(conditionId)} eventSlug=${eventSlug ?? ""} tokensRedeemed=${totalAmount} payoutUsd=${payoutUsd}`);
         clearMarketHoldings(conditionId);
         logger.ok(`Redeemed ${shortId(conditionId)}`);
         
-        // Only send claimed prize to TG if there's actual value, though in dry run it's simulated.
-        if (!tradingEnv.DRY_RUN_MODE || tradingEnv.DRY_RUN_MODE) {
-             sendClaimedPrize(totalAmount);
-        }
+        sendClaimedPrize(totalAmount);
 
       } catch (redeemError) {
         const errorMsg = redeemError instanceof Error ? redeemError.message : String(redeemError);

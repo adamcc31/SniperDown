@@ -15,6 +15,7 @@ import type { WinPosition, MarketInfo } from "../types";
 import type { RealtimePriceService } from "./realtime-price-service";
 import { sendActionAborted } from "./telegram-reporter";
 import { getClobClient } from "../providers/clobclient";
+import { scheduleResolutionFallback } from "./resolution-fallback";
 
 function getSlugPrefix(): string {
   let raw = tradingEnv.POLYMARKET_SLUG_PREFIX || "";
@@ -61,6 +62,10 @@ export class WinMonitor {
     await store.setEventSlug(marketInfo.conditionId, marketInfo.eventSlug);
 
     if (this.lastConditionId !== marketInfo.conditionId) {
+      if (this.lastConditionId) {
+         // Pass the old conditionId and current downTokenId as a placeholder
+         scheduleResolutionFallback(this.lastConditionId, marketInfo.downTokenId);
+      }
       this.lastConditionId = marketInfo.conditionId;
       this.realtimePriceService?.subscribe(
         marketInfo.conditionId,

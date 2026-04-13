@@ -258,7 +258,10 @@ export async function sellToken(
           // Bug Fix: Infinite loop due to dust/rounding. Brutal absolute wipe requested.
           clearMarketHoldings(conditionId);
           
-          result = { status: "FILLED", makingAmount: String(shares) }; // ensures completely wiped
+          logTrade(`SELL_FILLED conditionId=${shortId(conditionId)} side=${side} reason=${reason} sold=${shares.toFixed(4)}`);
+          logger.ok(`SELL ${side} (${reason}): ${shares.toFixed(2)} tokens (DRY RUN)`);
+          sendOrderResult("SUCCESS", `Sold ${shares.toFixed(2)} shares of ${side} due to ${reason}. Returned $${mockGain.toFixed(2)} to balance.`);
+          return true;
       } else {
           result = await runWithoutClobRequestLog(() =>
             (client.createAndPostMarketOrder as (o: unknown, opt: unknown, t: string) => Promise<unknown>)(

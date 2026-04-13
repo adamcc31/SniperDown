@@ -65,3 +65,15 @@ export function sendDryRunSummary(uptimeStr: string) {
   const stats = getPaperStats();
   _callTelegramApi(`📊 *Dry Run Summary*\nRuntime: ${uptimeStr}\nTotal Executions: ${stats.totalMockTrades}\nWins: ${stats.winCount} | Losses: ${stats.lossCount}\nGross PnL: $${stats.grossPnl.toFixed(2)}`);
 }
+
+export function sendExpirationSettlement(outcome: "WIN" | "LOSS", shares: number, payout: number, conditionId: string) {
+  const emoji = outcome === "WIN" ? "🏆" : "💀";
+  const short = conditionId.length > 14 ? conditionId.slice(0, 10) + "…" : conditionId;
+  _callTelegramApi(
+    `${emoji} *Market Expiration Settlement* 👻 [DRY RUN]\n` +
+    `Outcome: *${outcome}*\n` +
+    `Shares Held: ${shares.toFixed(2)}\n` +
+    `Payout: $${payout.toFixed(2)}\n` +
+    `Market: \`${short}\``
+  );
+}
