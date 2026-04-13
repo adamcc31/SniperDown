@@ -64,9 +64,11 @@ export class WinMonitor {
       const oldConditionId = this.lastConditionId;
       if (oldConditionId) {
         const oldTokenHoldings = getAllHoldings()[oldConditionId] ?? {};
-        const hasOpenPosition = Object.values(oldTokenHoldings).some(v => v > 0);
-        if (hasOpenPosition) {
-          forceInstantSettlement(oldConditionId)
+        const oldShares = Object.values(oldTokenHoldings).reduce((sum, val) => sum + val, 0);
+        const oldPrincipal = await store.getInvestedPrincipal(oldConditionId) ?? tradingEnv.BUY_AMOUNT_USD;
+
+        if (oldShares > 0) {
+          forceInstantSettlement(oldConditionId, oldShares, oldPrincipal)
             .catch(err => logger.error("[Settlement] Background error", err));
         }
       }
@@ -220,7 +222,7 @@ export class WinMonitor {
           const storedPrincipal = await store.getInvestedPrincipal(
             marketInfo.conditionId
           );
-          const costBasis = storedPrincipal ?? (position.buyPrice * shares) ?? tradingEnv.BUY_AMOUNT_USD;
+          const costBasis = storedPrincipal ?? ((position.buyPrice * shares) || tradingEnv.BUY_AMOUNT_USD);
 
           logger.info(`Win: ${reason} ${currentPrice.toFixed(3)}, selling ${position.side}`);
           const ok = await sellToken(
