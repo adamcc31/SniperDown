@@ -109,7 +109,7 @@ export async function buyToken(
       const buffer = tradingEnv.BUY_PRICE_BUFFER;
       const orderPrice = clampPrice(Math.min(0.99, currentPrice * (1 + buffer)));
       const shares = amountUsd / currentPrice;
-      const { valid } = await validateBuyOrderBalance(client, amountUsd);
+      const { valid } = tradingEnv.DRY_RUN_MODE ? { valid: true } : await validateBuyOrderBalance(client, amountUsd);
       if (!valid) {
         logger.skip("Buy: insufficient balance/allowance");
         return false;
@@ -123,26 +123,31 @@ export async function buyToken(
       logger.buy(`BUY ${side}: $${amountUsd.toFixed(2)} @ ${orderPrice.toFixed(3)} (ref ${currentPrice.toFixed(3)} +${(buffer * 100).toFixed(0)}%)`);
       logTrade(`BUY conditionId=${shortId(marketInfo.conditionId)} eventSlug=${marketInfo.eventSlug} side=${side} tokenId=${shortId(tokenId)} amountUsd=${amountUsd} price=${orderPrice.toFixed(4)}`);
       let result: { status?: string; makingAmount?: string; takingAmount?: string };
-      try {
-        result = await runWithoutClobRequestLog(() =>
-          (client.createAndPostMarketOrder as (o: unknown, opt: unknown, t: string) => Promise<unknown>)(
-            order,
-            { tickSize: TICK_SIZE, negRisk: NEG_RISK },
-            "FAK"
-          )
-        ) as { status?: string; makingAmount?: string; takingAmount?: string };
-      } catch (fakErr: unknown) {
-        const msg = fakErr instanceof Error ? fakErr.message : String(fakErr);
-        const dataError = (fakErr as { response?: { data?: { error?: string } } })?.response?.data?.error ?? "";
-        const isFakNoMatch = /no orders found to match|FAK order.*killed|FAK.*partially filled or killed/i.test(msg) || /no orders found|FAK.*killed/i.test(String(dataError));
-        if (isFakNoMatch) {
-          logger.skip(`BUY: no liquidity at price (FAK killed). Will retry next cycle.`);
-          logTrade(`BUY_FAK_KILLED conditionId=${shortId(marketInfo.conditionId)} side=${side} orderPrice=${orderPrice.toFixed(4)}`);
+      if (tradingEnv.DRY_RUN_MODE) {
+        logger.info("👻 DRY RUN: Simulating FAK Buy Hit");
+        result = { status: "FILLED", takingAmount: shares.toString() };
+      } else {
+        try {
+          result = await runWithoutClobRequestLog(() =>
+            (client.createAndPostMarketOrder as (o: unknown, opt: unknown, t: string) => Promise<unknown>)(
+              order,
+              { tickSize: TICK_SIZE, negRisk: NEG_RISK },
+              "FAK"
+            )
+          ) as { status?: string; makingAmount?: string; takingAmount?: string };
+        } catch (fakErr: unknown) {
+          const msg = fakErr instanceof Error ? fakErr.message : String(fakErr);
+          const dataError = (fakErr as { response?: { data?: { error?: string } } })?.response?.data?.error ?? "";
+          const isFakNoMatch = /no orders found to match|FAK order.*killed|FAK.*partially filled or killed/i.test(msg) || /no orders found|FAK.*killed/i.test(String(dataError));
+          if (isFakNoMatch) {
+            logger.skip(`BUY: no liquidity at price (FAK killed). Will retry next cycle.`);
+            logTrade(`BUY_FAK_KILLED conditionId=${shortId(marketInfo.conditionId)} side=${side} orderPrice=${orderPrice.toFixed(4)}`);
+            return false;
+          }
+          logger.error("BUY: order not filled");
+          logTrade(`BUY_FAIL conditionId=${shortId(marketInfo.conditionId)} side=${side}`);
           return false;
         }
-        logger.error("BUY: order not filled");
-        logTrade(`BUY_FAIL conditionId=${shortId(marketInfo.conditionId)} side=${side}`);
-        return false;
       }
       const isSuccess =
         result &&
@@ -231,13 +236,19 @@ export async function sellToken(
       };
       logger.sell(`SELL ${side} ${reason}: ${amount.toFixed(2)} shares @ ${sellPrice.toFixed(3)} (bid ${bestBid.toFixed(3)})`);
       logTrade(`SELL conditionId=${shortId(conditionId)} eventSlug=${eventSlug} side=${side} reason=${reason} shares=${amount} price=${sellPrice.toFixed(4)} bid=${bestBid.toFixed(4)}`);
-      const result = await runWithoutClobRequestLog(() =>
-        (client.createAndPostMarketOrder as (o: unknown, opt: unknown, t: string) => Promise<unknown>)(
-          marketOrder,
-          { tickSize: TICK_SIZE, negRisk: NEG_RISK },
-          OrderType.FAK
-        )
-      ) as { status?: string; makingAmount?: string };
+      let result: { status?: string; makingAmount?: string };
+      if (tradingEnv.DRY_RUN_MODE) {
+        logger.info("👻 DRY RUN: Simulating FAK Sell Hit");
+        result = { status: "FILLED", makingAmount: amount.toString() };
+      } else {
+        result = await runWithoutClobRequestLog(() =>
+          (client.createAndPostMarketOrder as (o: unknown, opt: unknown, t: string) => Promise<unknown>)(
+            marketOrder,
+            { tickSize: TICK_SIZE, negRisk: NEG_RISK },
+            OrderType.FAK
+          )
+        ) as { status?: string; makingAmount?: string };
+      }
       const isSuccess =
         result &&
         (result.status === "FILLED" ||
