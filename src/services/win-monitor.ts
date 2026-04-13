@@ -16,6 +16,8 @@ import type { RealtimePriceService } from "./realtime-price-service";
 import { checkLiquidity } from "../utils/liquidity-guard";
 import { forceInstantSettlement } from "./resolution-fallback";
 import { sendOrderResult } from "./telegram-reporter";
+import * as paperLedger from "../services/paper-ledger";
+import { simulateSellFillPrice, simulateGrossProceeds, realizedPnlFromClobExit } from "./sim-math";
 
 function getSlugPrefix(): string {
   let raw = tradingEnv.POLYMARKET_SLUG_PREFIX || "";
@@ -193,17 +195,35 @@ export class WinMonitor {
             getBestBid
           );
           if (ok) {
-            const realizedPnl = shares * currentPrice - costBasis;
+            const bestBid = getBestBid(position.tokenId) ?? currentPrice;
+            const simulatedExitPrice = tradingEnv.DRY_RUN_MODE
+              ? simulateSellFillPrice(bestBid)
+              : bestBid;
+            const grossProceeds = simulateGrossProceeds(shares, simulatedExitPrice);
+            const realizedPnl = realizedPnlFromClobExit(grossProceeds, costBasis);
 
+            // 1. Update the Paper Ledger if in Dry Run
+            if (tradingEnv.DRY_RUN_MODE) {
+              if (paperLedger.adjustSimBalance) {
+                paperLedger.adjustSimBalance(realizedPnl);
+              } else {
+                logger.warn("paperLedger.adjustSimBalance not implemented, sim balance will not update.");
+              }
+            }
+
+            // 2. Await Telegram Alert
             await sendOrderResult({
               side: position.side,
-              reason,
+              reason: reason,
               soldAmount: shares,
-              sellPrice: currentPrice,
-              realizedPnl,
+              sellPrice: simulatedExitPrice,
+              realizedPnl: realizedPnl,
+              isWin: realizedPnl >= 0,
               conditionId: marketInfo.conditionId,
               eventSlug: marketInfo.eventSlug,
             });
+
+            // 3. Clear the position
             await store.setPosition(marketInfo.conditionId, null);
           }
         } else {

@@ -11,6 +11,8 @@ import { existsSync, mkdirSync, appendFileSync } from "fs";
 import { resolve } from "path";
 import { sendOrderResult } from "./telegram-reporter";
 import * as store from "../utils/file-store";
+import * as paperLedger from "./paper-ledger";
+import { realizedPnlWin } from "./sim-math";
 
 const REDEEM_INTERVAL_MS = 160 * 1000;
 const LOG_DIR = resolve(process.cwd(), "log");
@@ -49,11 +51,15 @@ async function checkAndRedeemPositions(): Promise<void> {
         logger.ok(`Redeemed ${shortId(conditionId)}`);
         
         const principal = await store.getInvestedPrincipal(conditionId) ?? totalAmount;
-        sendOrderResult({
+        const realizedPnl = realizedPnlWin(totalAmount, principal);
+        if (tradingEnv.DRY_RUN_MODE) {
+          paperLedger.adjustSimBalance(realizedPnl);
+        }
+        await sendOrderResult({
           side: "redeem",
           reason: "settlement",
           soldAmount: totalAmount,
-          realizedPnl: totalAmount - principal,
+          realizedPnl,
           isWin: true,
           conditionId,
           eventSlug: eventSlug ?? "",

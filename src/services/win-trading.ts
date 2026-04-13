@@ -16,6 +16,7 @@ import { resolve } from "path";
 import * as store from "../utils/file-store";
 import { sendOrderExecution } from "./telegram-reporter";
 import * as paperLedger from "./paper-ledger";
+import { simulateBuyFillPrice, simulateSharesReceived, simulateSellFillPrice } from "./sim-math";
 
 const TICK_SIZE = tradingEnv.TICK_SIZE;
 const NEG_RISK = tradingEnv.NEG_RISK;
@@ -109,7 +110,10 @@ export async function buyToken(
       }
       const buffer = tradingEnv.BUY_PRICE_BUFFER;
       const orderPrice = clampPrice(Math.min(0.99, currentPrice * (1 + buffer)));
-      const shares = amountUsd / currentPrice;
+      const dryRunFillPrice = simulateBuyFillPrice(currentPrice);
+      const shares = tradingEnv.DRY_RUN_MODE
+        ? simulateSharesReceived(amountUsd, dryRunFillPrice)
+        : amountUsd / currentPrice;
       const { valid } = tradingEnv.DRY_RUN_MODE ? { valid: true } : await validateBuyOrderBalance(client, amountUsd);
       if (!valid) {
         logger.skip("Buy: insufficient balance/allowance");
@@ -166,10 +170,11 @@ export async function buyToken(
         logger.ok(`BUY ${side}: ${tokensReceived.toFixed(2)} shares`);
         
         await store.setInvestedPrincipal(marketInfo.conditionId, amountUsd);
-        sendOrderExecution({
+        const fillPriceForReport = tradingEnv.DRY_RUN_MODE ? dryRunFillPrice : orderPrice;
+        await sendOrderExecution({
           side,
           amountUsd,
-          price: orderPrice,
+          price: fillPriceForReport,
           shares: tokensReceived,
           conditionId: marketInfo.conditionId,
           eventSlug: marketInfo.eventSlug,
@@ -227,7 +232,9 @@ export async function sellToken(
         logger.error("Sell: could not get bid for token");
         return false;
       }
-      const sellPrice = clampPrice(Math.max(bestBid * 0.98, parseFloat(TICK_SIZE)));
+      const sellPrice = tradingEnv.DRY_RUN_MODE
+        ? simulateSellFillPrice(bestBid)
+        : clampPrice(Math.max(bestBid * 0.98, parseFloat(TICK_SIZE)));
       const amount = Math.floor(shares * 100) / 100;
       if (amount <= 0) return false;
       const marketOrder = {
@@ -241,8 +248,6 @@ export async function sellToken(
       let result: { status?: string; makingAmount?: string };
       if (tradingEnv.DRY_RUN_MODE) {
         logger.info("👻 DRY RUN: Simulating FAK Sell Hit");
-        const proceeds = amount * sellPrice;
-        paperLedger.adjustSimBalance(proceeds);
         result = { status: "FILLED", makingAmount: amount.toString() };
       } else {
         result = await runWithoutClobRequestLog(() =>
