@@ -15,12 +15,10 @@ import { validateBuyOrderBalance } from "../utils/balance";
 import { tradingEnv } from "../config/env";
 import { logger, shortId } from "../logger";
 import type { MarketInfo } from "../types";
-import * as store from "../utils/file-store";
 import { existsSync, mkdirSync, appendFileSync } from "fs";
 import { resolve } from "path";
 import { sendOrderExecution, sendOrderResult } from "./telegram-reporter";
-import { addPaperBalance, deductPaperBalance, recordMockTrade, recordMockWin, recordMockLoss } from "./paper-ledger";
-import { regimeFilter } from "./regime-filter";
+import { addPaperBalance, deductPaperBalance, recordMockTrade, recordMockWin, recordMockLoss, getPrincipal, recordPrincipal } from "./paper-ledger";
 
 const TICK_SIZE = tradingEnv.TICK_SIZE;
 const NEG_RISK = tradingEnv.NEG_RISK;
@@ -114,7 +112,6 @@ export async function buyToken(
       }
       const buffer = tradingEnv.BUY_PRICE_BUFFER;
       const orderPrice = clampPrice(Math.min(0.99, currentPrice * (1 + buffer)));
-      
       const shares = amountUsd / currentPrice;
       const { valid } = await validateBuyOrderBalance(client, amountUsd);
       if (!valid) {
@@ -129,16 +126,17 @@ export async function buyToken(
       };
       logger.buy(`BUY ${side}: $${amountUsd.toFixed(2)} @ ${orderPrice.toFixed(3)} (ref ${currentPrice.toFixed(3)} +${(buffer * 100).toFixed(0)}%)`);
       logTrade(`BUY conditionId=${shortId(marketInfo.conditionId)} eventSlug=${marketInfo.eventSlug} side=${side} tokenId=${shortId(tokenId)} amountUsd=${amountUsd} price=${orderPrice.toFixed(4)}`);
-      sendOrderExecution(side, "BUY Market (FAK)", orderPrice, amountUsd);
+      await sendOrderExecution(side, "BUY Market (FAK)", orderPrice, amountUsd);
 
       let result: { status?: string; makingAmount?: string; takingAmount?: string };
-      
+      let finalExecutedUsdValue = amountUsd; // for correct TG PnL math
+
       try {
         if (tradingEnv.DRY_RUN_MODE) {
-           deductPaperBalance(amountUsd);
-           recordMockTrade();
-           logger.info(`DRY RUN: Simulating FAK Buy Hit. Deducted $${amountUsd.toFixed(2)} from Paper Balance.`);
-           result = { status: "FILLED", takingAmount: String(shares) }; 
+           recordPrincipal(amountUsd);
+           // recordMockTrade(); // Removed: only record on close
+           logger.info(`DRY RUN: Position Opened. Cost Basis: $${amountUsd.toFixed(2)}. (PnL unchanged)`);
+           result = { status: "FILLED", takingAmount: String(shares) };
         } else {
            result = await runWithoutClobRequestLog(() =>
              (client.createAndPostMarketOrder as (o: unknown, opt: unknown, t: string) => Promise<unknown>)(
@@ -155,12 +153,12 @@ export async function buyToken(
         if (isFakNoMatch) {
           logger.skip(`BUY: no liquidity at price (FAK killed). Will retry next cycle.`);
           logTrade(`BUY_FAK_KILLED conditionId=${shortId(marketInfo.conditionId)} side=${side} orderPrice=${orderPrice.toFixed(4)}`);
-          sendOrderResult("FAILED", "No liquidity at price (FAK Killed).");
+          await sendOrderResult("FAILED", "No liquidity at price (FAK Killed).");
           return false;
         }
         logger.error("BUY: order not filled");
         logTrade(`BUY_FAIL conditionId=${shortId(marketInfo.conditionId)} side=${side}`);
-        sendOrderResult("ERROR", "Order execution failed internally.");
+        await sendOrderResult("ERROR", "Order execution failed internally.");
         return false;
       }
       const isSuccess =
@@ -176,16 +174,16 @@ export async function buyToken(
         addHoldings(marketInfo.conditionId, tokenId, tokensReceived);
         logTrade(`BUY_FILLED conditionId=${shortId(marketInfo.conditionId)} side=${side} shares=${tokensReceived.toFixed(4)}`);
         logger.ok(`BUY ${side}: ${tokensReceived.toFixed(2)} shares`);
-        sendOrderResult("SUCCESS", `Filled ${tokensReceived.toFixed(2)} shares of ${side}.`);
+        await sendOrderResult("SUCCESS", `Filled ${tokensReceived.toFixed(2)} shares of ${side}.`);
         return true;
       }
       logger.error("BUY: order not filled");
-      sendOrderResult("FAILED", "Order submission rejected by CLOB.");
+      await sendOrderResult("FAILED", "Order submission rejected by CLOB.");
       return false;
     } catch {
       logger.error("BUY: order not filled");
       logTrade(`BUY_FAIL conditionId=${shortId(marketInfo.conditionId)} side=${side}`);
-      sendOrderResult("ERROR", "Network or catastrophic failure.");
+      await sendOrderResult("ERROR", "Network or catastrophic failure.");
       return false;
     }
   });
@@ -244,34 +242,28 @@ export async function sellToken(
       logTrade(`SELL conditionId=${shortId(conditionId)} eventSlug=${eventSlug} side=${side} reason=${reason} shares=${amount} price=${sellPrice.toFixed(4)} bid=${bestBid.toFixed(4)}`);
       
       const estimatedUsd = amount * sellPrice;
-      sendOrderExecution(side, `SELL Market (FAK) - ${reason.toUpperCase()}`, sellPrice, estimatedUsd);
+      await sendOrderExecution(side, `SELL Market (FAK) - ${reason.toUpperCase()}`, sellPrice, estimatedUsd);
 
       let result;
       if (tradingEnv.DRY_RUN_MODE) {
-          // PnL Fix: Shares Owned * Execution Price
+          const principal = getPrincipal();
           const mockGain = shares * sellPrice; 
-          const position = await store.getPosition(conditionId);
-          const cost = position ? position.buyPrice * shares : 0;
-          const realizedPnl = mockGain - cost;
-
-          addPaperBalance(mockGain);
-          recordMockTrade();
-          if (reason === "profit_lock") {
-            recordMockWin();
-            regimeFilter.recordWin();
-          } else if (reason === "stop_loss") {
-            recordMockLoss();
-            regimeFilter.recordLoss();
-          }
+          const pnl = mockGain - principal;
           
-          logger.info(`DRY RUN: Simulating FAK Sell Hit. Added $${mockGain.toFixed(2)} to Paper Balance. Realized: $${realizedPnl.toFixed(2)}`);
+          addPaperBalance(pnl);
+          recordMockTrade();
+          if (reason === "profit_lock") recordMockWin();
+          else if (reason === "stop_loss") recordMockLoss();
+          
+          logger.info(`DRY RUN: Position Closed (${reason}). Principal: $${principal.toFixed(2)}, Return: $${mockGain.toFixed(2)}, PnL: $${pnl.toFixed(2)}`);
+          recordPrincipal(0); // Clear principal
           
           // Bug Fix: Infinite loop due to dust/rounding. Brutal absolute wipe requested.
           clearMarketHoldings(conditionId);
           
           logTrade(`SELL_FILLED conditionId=${shortId(conditionId)} side=${side} reason=${reason} sold=${shares.toFixed(4)}`);
           logger.ok(`SELL ${side} (${reason}): ${shares.toFixed(2)} tokens (DRY RUN)`);
-          sendOrderResult("SUCCESS", `Sold ${shares.toFixed(2)} shares of ${side} due to ${reason}. Returned $${mockGain.toFixed(2)} to balance.`, realizedPnl);
+          await sendOrderResult("SUCCESS", `Sold ${shares.toFixed(2)} shares of ${side} due to ${reason}. PnL: $${pnl.toFixed(2)}`);
           return true;
       } else {
           result = await runWithoutClobRequestLog(() =>
@@ -296,16 +288,16 @@ export async function sellToken(
         const reduced = reduceHoldings(conditionId, tokenId, soldAmount);
         logTrade(`SELL_FILLED conditionId=${shortId(conditionId)} side=${side} reason=${reason} sold=${reduced.toFixed(4)}`);
         logger.ok(`SELL ${side} (${reason}): ${reduced.toFixed(2)} tokens`);
-        sendOrderResult("SUCCESS", `Sold ${reduced.toFixed(2)} shares of ${side} due to ${reason}.`);
+        await sendOrderResult("SUCCESS", `Sold ${reduced.toFixed(2)} shares of ${side} due to ${reason}.`);
         return true;
       }
       logger.error("SELL: order not filled");
-      sendOrderResult("FAILED", "Sell order not filled by CLOB.");
+      await sendOrderResult("FAILED", "Sell order not filled by CLOB.");
       return false;
     } catch {
       logger.error("SELL: order not filled");
       logTrade(`SELL_FAIL conditionId=${shortId(conditionId)} side=${side} reason=${reason}`);
-      sendOrderResult("ERROR", "Network or catastrophic failure during Sell.");
+      await sendOrderResult("ERROR", "Network or catastrophic failure during Sell.");
       return false;
     }
   });

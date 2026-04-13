@@ -14,11 +14,10 @@
 
 import { isMarketResolved } from "../utils/redeem";
 import { getAllHoldings, clearMarketHoldings } from "../utils/holdings";
-import { addPaperBalance, recordMockTrade, recordMockWin, recordMockLoss } from "./paper-ledger";
+import { addPaperBalance, recordMockTrade, recordMockWin, recordMockLoss, getPrincipal, recordPrincipal } from "./paper-ledger";
 import { sendExpirationSettlement } from "./telegram-reporter";
 import { logger, shortId } from "../logger";
 import * as store from "../utils/file-store";
-import { regimeFilter } from "./regime-filter";
 
 const RESOLUTION_DELAY_MS = 60_000;     // Wait 60s for Polymarket API to finalize
 const MAX_RESOLUTION_RETRIES = 5;
@@ -99,12 +98,11 @@ async function resolveExpiredMarket(
           `Resolution Fallback: ${shortId(conditionId)} still unresolved after ` +
           `${MAX_RESOLUTION_RETRIES} attempts. Force-settling as LOSS.`
         );
-        recordMockTrade();
         recordMockLoss();
-        regimeFilter.recordLoss();
         clearMarketHoldings(conditionId);
         await store.setPosition(conditionId, null);
-        sendExpirationSettlement("LOSS", totalShares, 0, conditionId);
+        recordPrincipal(0); // Clear principal
+        await sendExpirationSettlement("LOSS", totalShares, 0, conditionId);
         return;
       }
 
@@ -112,26 +110,33 @@ async function resolveExpiredMarket(
       const downWon = winningIndexSets?.includes(2) ?? false;
 
       if (downWon) {
+        const principal = getPrincipal();
         const payout = totalShares * 1.00;
-        addPaperBalance(payout);
+        const pnl = payout - principal;
+        
+        addPaperBalance(pnl);
         recordMockTrade();
         recordMockWin();
-        regimeFilter.recordWin();
         logger.ok(
           `Resolution Fallback: ${shortId(conditionId)} → DOWN WON. ` +
-          `Added $${payout.toFixed(2)} (${totalShares.toFixed(2)} shares × $1.00)`
+          `PnL: $${pnl.toFixed(2)} (${totalShares.toFixed(2)} shares @ $1.00)`
         );
-        sendExpirationSettlement("WIN", totalShares, payout, conditionId);
+        recordPrincipal(0); // Clear principal
+        await sendExpirationSettlement("WIN", totalShares, payout, conditionId);
       } else {
-        // DOWN lost — no payout. Cost was already deducted at buy time.
+        // DOWN lost — no payout. 
+        const principal = getPrincipal();
+        const pnl = 0 - principal;
+        
+        addPaperBalance(pnl); // Deduct the lost principal from balance at this point
         recordMockTrade();
         recordMockLoss();
-        regimeFilter.recordLoss();
         logger.warn(
           `Resolution Fallback: ${shortId(conditionId)} → DOWN LOST. ` +
-          `${totalShares.toFixed(2)} shares worthless. No balance adjustment.`
+          `PnL: $${pnl.toFixed(2)} (${totalShares.toFixed(2)} shares worthless).`
         );
-        sendExpirationSettlement("LOSS", totalShares, 0, conditionId);
+        recordPrincipal(0); // Clear principal
+        await sendExpirationSettlement("LOSS", totalShares, 0, conditionId);
       }
 
       clearMarketHoldings(conditionId);
@@ -148,12 +153,11 @@ async function resolveExpiredMarket(
       } else {
         // Exhaust retries — force LOSS settlement
         logger.warn(`Resolution Fallback: Exhausted retries for ${shortId(conditionId)}. Force-settling as LOSS.`);
-        recordMockTrade();
         recordMockLoss();
-        regimeFilter.recordLoss();
         clearMarketHoldings(conditionId);
         await store.setPosition(conditionId, null);
-        sendExpirationSettlement("LOSS", totalShares, 0, conditionId);
+        recordPrincipal(0); // Clear principal
+        await sendExpirationSettlement("LOSS", totalShares, 0, conditionId);
       }
     }
   }

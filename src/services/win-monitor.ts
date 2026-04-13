@@ -16,9 +16,8 @@ import type { RealtimePriceService } from "./realtime-price-service";
 import { sendActionAborted } from "./telegram-reporter";
 import { getClobClient } from "../providers/clobclient";
 import { scheduleResolutionFallback } from "./resolution-fallback";
-import { regimeFilter } from "./regime-filter";
-import { getProxyWalletBalanceUsd, getDynamicBuyAmount } from "../utils/balance";
-import { getDailyStartingBalance } from "./paper-ledger";
+import { getAllHoldings } from "../utils/holdings";
+import { shortId } from "../logger";
 
 function getSlugPrefix(): string {
   let raw = tradingEnv.POLYMARKET_SLUG_PREFIX || "";
@@ -45,23 +44,6 @@ export class WinMonitor {
     const enabled = await store.getEnabled();
     if (!enabled) return;
 
-    // ALGORITHMIC CIRCUIT BREAKER
-    const clob = await getClobClient();
-    const { balanceUsd } = await getProxyWalletBalanceUsd(clob);
-    const dailyStartBalance = getDailyStartingBalance();
-    
-    if (regimeFilter.checkCircuitBreaker(balanceUsd, dailyStartBalance)) {
-      logger.stop("CIRCUIT BREAKER TRIGGERED. SHUTTING DOWN.");
-      process.exit(1);
-    }
-
-    // REGIME COOLDOWN CHECK
-    if (regimeFilter.isPaused()) {
-      const remaining = regimeFilter.getCooldownRemainingMinutes();
-      logger.skip(`Regime Filter: Bot is PAUSED. Cooldown remaining: ${remaining} mins.`);
-      return;
-    }
-
     const slugPrefix = getSlugPrefix();
     if (!slugPrefix?.trim()) {
       logger.skip("Win: POLYMARKET_SLUG_PREFIX not set (e.g. btc-updown-5m, eth-updown-15m, xrp-updown-1h)");
@@ -83,8 +65,18 @@ export class WinMonitor {
 
     if (this.lastConditionId !== marketInfo.conditionId) {
       if (this.lastConditionId) {
-         // Pass the old conditionId and current downTokenId as a placeholder
-         scheduleResolutionFallback(this.lastConditionId, marketInfo.downTokenId);
+         logger.info(`🔄 Market Change Detected: ${shortId(this.lastConditionId)} -> ${shortId(marketInfo.conditionId)}`);
+         
+         // Fix: Check for dangling holdings in the old market before switching focus
+         const oldHoldings = getHoldings(this.lastConditionId, ""); // Check any token in old market
+         const allH = getAllHoldings();
+         const hasOld = allH[this.lastConditionId] && Object.values(allH[this.lastConditionId]).some(v => v > 0);
+         
+         if (hasOld) {
+            logger.warn(`⚠️ Exiting market ${shortId(this.lastConditionId)} with active holdings! Triggering settlement.`);
+            // Pass the old conditionId and old downTokenId if we had it, but scheduleResolutionFallback handles it.
+            scheduleResolutionFallback(this.lastConditionId, ""); 
+         }
       }
       this.lastConditionId = marketInfo.conditionId;
       this.realtimePriceService?.subscribe(
@@ -122,9 +114,7 @@ export class WinMonitor {
     const maxBuyPrice = tradingEnv.MAX_BUY_PRICE;
     const stopLossPrice = tradingEnv.STOP_LOSS_PRICE;
     const profitLockPrice = tradingEnv.PROFIT_LOCK_PRICE;
-    
-    // DYNAMIC POSITION SIZING
-    const buyAmountUsd = getDynamicBuyAmount(balanceUsd);
+    const buyAmountUsd = tradingEnv.BUY_AMOUNT_USD;
 
     let position = await store.getPosition(marketInfo.conditionId);
     const downShares = getHoldings(marketInfo.conditionId, marketInfo.downTokenId!);
@@ -136,17 +126,15 @@ export class WinMonitor {
     if (now - this.lastEvalPrintAt >= 4000) {
       this.lastEvalPrintAt = now;
       let actionTxt = "Waiting...";
-      if (buyAmountUsd <= 0) {
-        actionTxt = "EQUITY TOO LOW (<$10)";
-      } else if (mayBuy && downPrice >= triggerPrice && downPrice <= maxBuyPrice) {
-        actionTxt = `EXECUTING MOCK BUY ($${buyAmountUsd.toFixed(2)})!`;
+      if (mayBuy && downPrice >= triggerPrice && downPrice <= maxBuyPrice) {
+        actionTxt = "EXECUTING MOCK BUY!";
       } else if (!mayBuy) {
         actionTxt = "Position Active // Locked";
       }
-      logger.info(`[EVAL] DOWN Price: ${downPrice.toFixed(3)} | Size: $${buyAmountUsd.toFixed(2)} | Target: ${triggerPrice}-${maxBuyPrice} | Action: ${actionTxt}`);
+      logger.info(`[EVAL] DOWN Price: ${downPrice.toFixed(3)} | Target: ${triggerPrice}-${maxBuyPrice} | Action: ${actionTxt}`);
     }
 
-    if (mayBuy && buyAmountUsd > 0) {
+    if (mayBuy) {
       if (downPrice >= triggerPrice && downPrice > 0 && downPrice <= maxBuyPrice) {
         logger.info(`Win: Down price ${downPrice.toFixed(3)} in [${triggerPrice}, ${maxBuyPrice}], buying Down (once per market)`);
         const ok = await buyToken(
@@ -209,7 +197,7 @@ export class WinMonitor {
 
             if (liveBestBid > 0 && liveBestBid < 0.98) {
               logger.warn(`Slippage Guard: Live best bid is ${liveBestBid.toFixed(3)}. Aborting profit lock to protect EV.`);
-              sendActionAborted("Slippage Guard (Profit Lock)", `Desired Exit: ${profitLockPrice.toFixed(2)}, Live Bid: ${liveBestBid.toFixed(3)}.\nRetaining position for resolution.`);
+              await sendActionAborted("Slippage Guard (Profit Lock)", `Desired Exit: ${profitLockPrice.toFixed(2)}, Live Bid: ${liveBestBid.toFixed(3)}.\nRetaining position for resolution.`);
               return; // Abort cycle step for this position
             }
           } catch(err) {

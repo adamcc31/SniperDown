@@ -84,7 +84,7 @@ async function main(): Promise<void> {
 
     await runCycle();
     setInterval(runCycle, POLL_INTERVAL_MS);
-    setInterval(sendHeartbeat, HEARTBEAT_INTERVAL_MS);
+    setInterval(async () => await sendHeartbeat(), HEARTBEAT_INTERVAL_MS);
 
     if (tradingEnv.PRIVATE_KEY && APPROVE_INTERVAL_MS > 0) {
       setInterval(async () => {
@@ -99,22 +99,22 @@ async function main(): Promise<void> {
     }
 
     log.ok(`Win bot running (poll ${POLL_INTERVAL_MS}ms, approve every ${tradingEnv.APPROVE_INTERVAL_MINUTES}min)`);
-    sendStartPing();
+    await sendStartPing();
 
     if (tradingEnv.DRY_RUN_MODE) {
       log.info("48-Hour Kill Switch Armed.");
-      setTimeout(() => {
+      setTimeout(async () => {
         log.stop("48-Hour Kill Switch Triggered. Shutting down...");
-        sendActionAborted("KILL SWITCH", "48-Hour simulation period complete.");
+        await sendActionAborted("KILL SWITCH", "48-Hour simulation period complete.");
         setTimeout(() => {
           realtimePriceService?.shutdown();
           process.exit(0);
         }, 2000); // let TG message send
       }, 48 * 60 * 60 * 1000);
 
-      setInterval(() => {
+      setInterval(async () => {
         const uptimeHours = process.uptime() / 3600;
-        sendDryRunSummary(`${uptimeHours.toFixed(2)}h`);
+        await sendDryRunSummary(`${uptimeHours.toFixed(2)}h`);
       }, 2 * 60 * 60 * 1000);
     }
 
