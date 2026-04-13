@@ -7,7 +7,6 @@ const CLOB_BOOK_URL = "https://clob.polymarket.com/book";
 const CLOB_MIDPOINTS_URL = "https://clob.polymarket.com/midpoints";
 
 import type { GammaEvent, MarketInfo } from "../types";
-import { logger } from "../logger";
 
 export interface OrderBook {
   bids: Array<{ price: string; size: string }>;

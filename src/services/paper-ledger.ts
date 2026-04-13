@@ -2,7 +2,7 @@
  * Valid isolated Paper Trading Ledger. In-memory, resets on bot startup.
  */
 
-const STARTING_BALANCE = 30.00;
+const STARTING_BALANCE = 100.00;
 let simulated_usdc_balance = STARTING_BALANCE;
 let dailyStartingBalance = STARTING_BALANCE;
 let totalMockTrades = 0;
