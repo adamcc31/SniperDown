@@ -9,15 +9,13 @@ import { buyToken, sellToken } from "./win-trading";
 import { getWindowSecondsFromSlug } from "../config/env";
 import { tradingEnv } from "../config/env";
 import { logger } from "../logger";
-import { getHoldings, getAllHoldings, clearMarketHoldings } from "../utils/holdings";
+import { getHoldings, getAllHoldings } from "../utils/holdings";
 import * as store from "../utils/file-store";
 import type { WinPosition, MarketInfo } from "../types";
 import type { RealtimePriceService } from "./realtime-price-service";
-import { sendActionAborted } from "./telegram-reporter";
-import { getClobClient } from "../providers/clobclient";
+import { checkLiquidity } from "../utils/liquidity-guard";
 import { forceInstantSettlement } from "./resolution-fallback";
-import { getPrincipal } from "./paper-ledger";
-import { shortId } from "../logger";
+import { sendOrderResult } from "./telegram-reporter";
 
 function getSlugPrefix(): string {
   let raw = tradingEnv.POLYMARKET_SLUG_PREFIX || "";
@@ -33,7 +31,6 @@ function getSlugPrefix(): string {
 
 export class WinMonitor {
   private lastConditionId: string | null = null;
-  private lastEvalPrintAt: number = 0;
 
   constructor(
     private polymarket: PolymarketClient,
@@ -64,27 +61,14 @@ export class WinMonitor {
     await store.setEventSlug(marketInfo.conditionId, marketInfo.eventSlug);
 
     if (this.lastConditionId !== marketInfo.conditionId) {
-      if (this.lastConditionId) {
-         logger.info(`🔄 Market Change Detected: ${shortId(this.lastConditionId)} -> ${shortId(marketInfo.conditionId)}`);
-         
-         // User Directive: Non-blocking Background Settlement
-         const allH = getAllHoldings();
-         const oldMarketHoldings = allH[this.lastConditionId];
-         const shares = oldMarketHoldings ? Object.values(oldMarketHoldings).reduce((sum, val) => sum + val, 0) : 0;
-         
-         if (shares > 0 && this.lastConditionId) {
-            logger.warn(`⚠️ Exiting market ${shortId(this.lastConditionId)} with ${shares.toFixed(2)} active holdings! Triggering background settlement.`);
-            const principal = getPrincipal();
-            
-            // Fire-and-forget: Detached promise poller
-            forceInstantSettlement(this.lastConditionId!, shares, principal).catch(err => {
-               logger.error(`Background Settlement Error for ${shortId(this.lastConditionId!)}: ${err}`);
-            });
-
-            // Immediate state wipe to allow instant switch to new market focus
-            clearMarketHoldings(this.lastConditionId);
-            store.setPosition(this.lastConditionId, null).catch(() => {});
-         }
+      const oldConditionId = this.lastConditionId;
+      if (oldConditionId) {
+        const oldTokenHoldings = getAllHoldings()[oldConditionId] ?? {};
+        const hasOpenPosition = Object.values(oldTokenHoldings).some(v => v > 0);
+        if (hasOpenPosition) {
+          forceInstantSettlement(oldConditionId)
+            .catch(err => logger.error("[Settlement] Background error", err));
+        }
       }
       this.lastConditionId = marketInfo.conditionId;
       this.realtimePriceService?.subscribe(
@@ -125,26 +109,58 @@ export class WinMonitor {
     const buyAmountUsd = tradingEnv.BUY_AMOUNT_USD;
 
     let position = await store.getPosition(marketInfo.conditionId);
+    const upShares = getHoldings(marketInfo.conditionId, marketInfo.upTokenId!);
     const downShares = getHoldings(marketInfo.conditionId, marketInfo.downTokenId!);
     const alreadyBoughtInMarket = await store.hasBoughtInMarket(marketInfo.conditionId);
-    const hasPositionOrHoldings = position !== null || downShares > 0;
+    const hasPositionOrHoldings = position !== null || upShares > 0 || downShares > 0;
     const mayBuy = !alreadyBoughtInMarket && !hasPositionOrHoldings;
 
-    const now = Date.now();
-    if (now - this.lastEvalPrintAt >= 4000) {
-      this.lastEvalPrintAt = now;
-      let actionTxt = "Waiting...";
-      if (mayBuy && downPrice >= triggerPrice && downPrice <= maxBuyPrice) {
-        actionTxt = "EXECUTING MOCK BUY!";
-      } else if (!mayBuy) {
-        actionTxt = "Position Active // Locked";
-      }
-      logger.info(`[EVAL] DOWN Price: ${downPrice.toFixed(3)} | Target: ${triggerPrice}-${maxBuyPrice} | Action: ${actionTxt}`);
-    }
-
     if (mayBuy) {
-      if (downPrice >= triggerPrice && downPrice > 0 && downPrice <= maxBuyPrice) {
+      if (upPrice >= triggerPrice && upPrice > 0 && upPrice <= maxBuyPrice) {
+        logger.info(`Win: Up price ${upPrice.toFixed(3)} in [${triggerPrice}, ${maxBuyPrice}], buying Up (once per market)`);
+        
+        const upLiqOk = await checkLiquidity(
+          marketInfo.upTokenId!,
+          tradingEnv.MAX_BUY_PRICE,
+          tradingEnv.BUY_AMOUNT_USD
+        );
+        if (!upLiqOk) {
+          logger.skip(`[LiquidityGuard] Insufficient volume for Up entry. Skipping cycle.`);
+          return;
+        }
+
+        const ok = await buyToken(
+          marketInfo.upTokenId!,
+          "Up",
+          buyAmountUsd,
+          marketInfo
+        );
+        if (ok) {
+          await store.markBoughtInMarket(marketInfo.conditionId);
+          const shares = getHoldings(marketInfo.conditionId, marketInfo.upTokenId!);
+          position = {
+            conditionId: marketInfo.conditionId,
+            side: "Up",
+            tokenId: marketInfo.upTokenId!,
+            buyPrice: upPrice,
+            shares,
+            boughtAt: Math.floor(Date.now() / 1000),
+          };
+          await store.setPosition(marketInfo.conditionId, position);
+        }
+      } else if (downPrice >= triggerPrice && downPrice > 0 && downPrice <= maxBuyPrice) {
         logger.info(`Win: Down price ${downPrice.toFixed(3)} in [${triggerPrice}, ${maxBuyPrice}], buying Down (once per market)`);
+        
+        const downLiqOk = await checkLiquidity(
+          marketInfo.downTokenId!,
+          tradingEnv.MAX_BUY_PRICE,
+          tradingEnv.BUY_AMOUNT_USD
+        );
+        if (!downLiqOk) {
+          logger.skip(`[LiquidityGuard] Insufficient volume for Down entry. Skipping cycle.`);
+          return;
+        }
+
         const ok = await buyToken(
           marketInfo.downTokenId!,
           "Down",
@@ -168,7 +184,17 @@ export class WinMonitor {
     }
 
     if (!position) {
-      if (downShares > 0) {
+      if (upShares > 0) {
+        position = {
+          conditionId: marketInfo.conditionId,
+          side: "Up",
+          tokenId: marketInfo.upTokenId!,
+          buyPrice: 0,
+          shares: upShares,
+          boughtAt: 0,
+        };
+        await store.setPosition(marketInfo.conditionId, position);
+      } else if (downShares > 0) {
         position = {
           conditionId: marketInfo.conditionId,
           side: "Down",
@@ -181,60 +207,43 @@ export class WinMonitor {
       }
     }
 
-    if (position && position.side === "Down") {
-      const currentPrice = downPrice;
+    if (position) {
+      const currentPrice = position.side === "Up" ? upPrice : downPrice;
       const shares = getHoldings(marketInfo.conditionId, position.tokenId);
       if (shares <= 0) {
         await store.setPosition(marketInfo.conditionId, null);
-        return; // Guard Fix: State wipe verified, abort logic immediately to prevent infinite evaluation sweeps
       } else {
         const getBestBid = (tid: string) => this.realtimePriceService?.getBestBid(tid) ?? null;
-        if (currentPrice >= profitLockPrice) {
-          logger.info(`Win: profit lock ${currentPrice.toFixed(3)} >= ${profitLockPrice}, checking live orderbook...`);
+        if (currentPrice >= profitLockPrice || currentPrice <= stopLossPrice) {
+          const reason = currentPrice >= profitLockPrice ? "profit_lock" : "stop_loss";
           
-          try {
-            const clob = await getClobClient();
-            const priceResp = await clob.getPrice(position.tokenId, "SELL");
-            let liveBestBid = 0;
-            if (typeof priceResp === "number" && !Number.isNaN(priceResp)) liveBestBid = priceResp;
-            else if (priceResp && typeof priceResp === "object") {
-              const o = priceResp as Record<string, unknown>;
-              const p = o.mid ?? o.price ?? o.SELL ?? o.bestBid;
-              if (typeof p === "number" && !Number.isNaN(p)) liveBestBid = p;
-            }
+          const storedPrincipal = await store.getInvestedPrincipal(
+            marketInfo.conditionId
+          );
+          const costBasis = storedPrincipal ?? (position.buyPrice * shares) ?? tradingEnv.BUY_AMOUNT_USD;
 
-            if (liveBestBid > 0 && liveBestBid < 0.98) {
-              logger.warn(`Slippage Guard: Live best bid is ${liveBestBid.toFixed(3)}. Aborting profit lock to protect EV.`);
-              await sendActionAborted("Slippage Guard (Profit Lock)", `Desired Exit: ${profitLockPrice.toFixed(2)}, Live Bid: ${liveBestBid.toFixed(3)}.\nRetaining position for resolution.`);
-              return; // Abort cycle step for this position
-            }
-          } catch(err) {
-            logger.warn("Failed to fetch live best bid for slippage guard. Falling back to cached check or risk. " + String(err));
+          logger.info(`Win: ${reason} ${currentPrice.toFixed(3)}, selling ${position.side}`);
+          const ok = await sellToken(
+            position.tokenId,
+            shares,
+            marketInfo.conditionId,
+            marketInfo.eventSlug,
+            position.side,
+            reason,
+            getBestBid
+          );
+          if (ok) {
+            sendOrderResult({
+              side: position.side,
+              reason,
+              soldAmount: shares,
+              sellPrice: currentPrice,
+              realizedPnl: shares * currentPrice - costBasis,
+              conditionId: marketInfo.conditionId,
+              eventSlug: marketInfo.eventSlug,
+            });
+            await store.setPosition(marketInfo.conditionId, null);
           }
-
-          logger.info(`Win: selling ${position.side} for profit lock`);
-          const ok = await sellToken(
-            position.tokenId,
-            shares,
-            marketInfo.conditionId,
-            marketInfo.eventSlug,
-            position.side,
-            "profit_lock",
-            getBestBid
-          );
-          if (ok) await store.setPosition(marketInfo.conditionId, null);
-        } else if (currentPrice <= stopLossPrice) {
-          logger.info(`Win: stop loss ${currentPrice.toFixed(3)} <= ${stopLossPrice}, selling ${position.side}`);
-          const ok = await sellToken(
-            position.tokenId,
-            shares,
-            marketInfo.conditionId,
-            marketInfo.eventSlug,
-            position.side,
-            "stop_loss",
-            getBestBid
-          );
-          if (ok) await store.setPosition(marketInfo.conditionId, null);
         } else {
           await store.setPosition(marketInfo.conditionId, { ...position, shares: getHoldings(marketInfo.conditionId, position.tokenId) });
         }

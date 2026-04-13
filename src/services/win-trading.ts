@@ -6,19 +6,15 @@
 import { OrderType, Side } from "@polymarket/clob-client";
 import { getClobClient, invalidateClobClient, isCredentialError } from "../providers/clobclient";
 import { createCredential, updateCredential } from "../security/createCredential";
-import {
-  addHoldings,
-  reduceHoldings,
-  clearMarketHoldings,
-} from "../utils/holdings";
+import { addHoldings, reduceHoldings } from "../utils/holdings";
 import { validateBuyOrderBalance } from "../utils/balance";
 import { tradingEnv } from "../config/env";
 import { logger, shortId } from "../logger";
 import type { MarketInfo } from "../types";
 import { existsSync, mkdirSync, appendFileSync } from "fs";
 import { resolve } from "path";
-import { sendOrderExecution, sendOrderResult } from "./telegram-reporter";
-import { settleMockTrade, recordPrincipal, getPrincipal } from "./paper-ledger";
+import * as store from "../utils/file-store";
+import { sendOrderExecution } from "./telegram-reporter";
 
 const TICK_SIZE = tradingEnv.TICK_SIZE;
 const NEG_RISK = tradingEnv.NEG_RISK;
@@ -126,26 +122,15 @@ export async function buyToken(
       };
       logger.buy(`BUY ${side}: $${amountUsd.toFixed(2)} @ ${orderPrice.toFixed(3)} (ref ${currentPrice.toFixed(3)} +${(buffer * 100).toFixed(0)}%)`);
       logTrade(`BUY conditionId=${shortId(marketInfo.conditionId)} eventSlug=${marketInfo.eventSlug} side=${side} tokenId=${shortId(tokenId)} amountUsd=${amountUsd} price=${orderPrice.toFixed(4)}`);
-      await sendOrderExecution(side, "BUY Market (FAK)", orderPrice, amountUsd, shares);
-
       let result: { status?: string; makingAmount?: string; takingAmount?: string };
-      let finalExecutedUsdValue = amountUsd; // for correct TG PnL math
-
       try {
-        if (tradingEnv.DRY_RUN_MODE) {
-           recordPrincipal(amountUsd);
-           // recordMockTrade(); // Removed: only record on close
-           logger.info(`DRY RUN: Position Opened. Cost Basis: $${amountUsd.toFixed(2)}. (PnL unchanged)`);
-           result = { status: "FILLED", takingAmount: String(shares) };
-        } else {
-           result = await runWithoutClobRequestLog(() =>
-             (client.createAndPostMarketOrder as (o: unknown, opt: unknown, t: string) => Promise<unknown>)(
-               order,
-               { tickSize: TICK_SIZE, negRisk: NEG_RISK },
-               "FAK"
-             )
-           ) as { status?: string; makingAmount?: string; takingAmount?: string };
-        }
+        result = await runWithoutClobRequestLog(() =>
+          (client.createAndPostMarketOrder as (o: unknown, opt: unknown, t: string) => Promise<unknown>)(
+            order,
+            { tickSize: TICK_SIZE, negRisk: NEG_RISK },
+            "FAK"
+          )
+        ) as { status?: string; makingAmount?: string; takingAmount?: string };
       } catch (fakErr: unknown) {
         const msg = fakErr instanceof Error ? fakErr.message : String(fakErr);
         const dataError = (fakErr as { response?: { data?: { error?: string } } })?.response?.data?.error ?? "";
@@ -172,6 +157,17 @@ export async function buyToken(
         addHoldings(marketInfo.conditionId, tokenId, tokensReceived);
         logTrade(`BUY_FILLED conditionId=${shortId(marketInfo.conditionId)} side=${side} shares=${tokensReceived.toFixed(4)}`);
         logger.ok(`BUY ${side}: ${tokensReceived.toFixed(2)} shares`);
+        
+        await store.setInvestedPrincipal(marketInfo.conditionId, amountUsd);
+        sendOrderExecution({
+          side,
+          amountUsd,
+          price: orderPrice,
+          shares: tokensReceived,
+          conditionId: marketInfo.conditionId,
+          eventSlug: marketInfo.eventSlug,
+        });
+        
         return true;
       }
       logger.error("BUY: order not filled");
@@ -235,35 +231,13 @@ export async function sellToken(
       };
       logger.sell(`SELL ${side} ${reason}: ${amount.toFixed(2)} shares @ ${sellPrice.toFixed(3)} (bid ${bestBid.toFixed(3)})`);
       logTrade(`SELL conditionId=${shortId(conditionId)} eventSlug=${eventSlug} side=${side} reason=${reason} shares=${amount} price=${sellPrice.toFixed(4)} bid=${bestBid.toFixed(4)}`);
-      
-      const estimatedUsd = amount * sellPrice;
-      await sendOrderExecution(side, `SELL Market (FAK) - ${reason.toUpperCase()}`, sellPrice, estimatedUsd, shares);
-
-      let result;
-      if (tradingEnv.DRY_RUN_MODE) {
-          const principal = getPrincipal();
-          const { pnl } = settleMockTrade(shares, sellPrice);
-          const mockGain = shares * sellPrice;
-          
-          logger.info(`DRY RUN: Position Closed (${reason}). Principal: $${principal.toFixed(2)}, Return: $${mockGain.toFixed(2)}, PnL: $${pnl.toFixed(2)}`);
-          
-          // Bug Fix: Infinite loop due to dust/rounding. Brutal absolute wipe requested.
-          clearMarketHoldings(conditionId);
-          
-          logTrade(`SELL_FILLED conditionId=${shortId(conditionId)} side=${side} reason=${reason} sold=${shares.toFixed(4)}`);
-          logger.ok(`SELL ${side} (${reason}): ${shares.toFixed(2)} tokens (DRY RUN)`);
-          await sendOrderResult(reason.toUpperCase(), pnl, `Sold ${shares.toFixed(2)} shares of ${side} due to ${reason}.`);
-          return true;
-      } else {
-          result = await runWithoutClobRequestLog(() =>
-            (client.createAndPostMarketOrder as (o: unknown, opt: unknown, t: string) => Promise<unknown>)(
-              marketOrder,
-              { tickSize: TICK_SIZE, negRisk: NEG_RISK },
-              OrderType.FAK
-            )
-          ) as { status?: string; makingAmount?: string };
-      }
-
+      const result = await runWithoutClobRequestLog(() =>
+        (client.createAndPostMarketOrder as (o: unknown, opt: unknown, t: string) => Promise<unknown>)(
+          marketOrder,
+          { tickSize: TICK_SIZE, negRisk: NEG_RISK },
+          OrderType.FAK
+        )
+      ) as { status?: string; makingAmount?: string };
       const isSuccess =
         result &&
         (result.status === "FILLED" ||
@@ -277,16 +251,13 @@ export async function sellToken(
         const reduced = reduceHoldings(conditionId, tokenId, soldAmount);
         logTrade(`SELL_FILLED conditionId=${shortId(conditionId)} side=${side} reason=${reason} sold=${reduced.toFixed(4)}`);
         logger.ok(`SELL ${side} (${reason}): ${reduced.toFixed(2)} tokens`);
-        await sendOrderResult(reason.toUpperCase(), 0, `Sold ${reduced.toFixed(2)} shares of ${side} due to ${reason}.`);
         return true;
       }
       logger.error("SELL: order not filled");
-      await sendOrderResult("FAILED", 0, "Sell order not filled by CLOB.");
       return false;
     } catch {
       logger.error("SELL: order not filled");
       logTrade(`SELL_FAIL conditionId=${shortId(conditionId)} side=${side} reason=${reason}`);
-      await sendOrderResult("ERROR", 0, "Network or catastrophic failure during Sell.");
       return false;
     }
   });

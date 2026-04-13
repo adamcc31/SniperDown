@@ -9,8 +9,8 @@ import { logger, shortId } from "../logger";
 import { getEventSlug } from "../utils/file-store";
 import { existsSync, mkdirSync, appendFileSync } from "fs";
 import { resolve } from "path";
-import { sendClaimedPrize, sendExpirationSettlement } from "./telegram-reporter";
-import { settleMockTrade, getPrincipal } from "./paper-ledger";
+import { sendOrderResult } from "./telegram-reporter";
+import * as store from "../utils/file-store";
 
 const REDEEM_INTERVAL_MS = 160 * 1000;
 const LOG_DIR = resolve(process.cwd(), "log");
@@ -42,40 +42,40 @@ async function checkAndRedeemPositions(): Promise<void> {
       logger.redeem(`${shortId(conditionId)} resolved, winning: ${winningIndexSets?.join(", ")}`);
 
       try {
-        if (tradingEnv.DRY_RUN_MODE) {
-          const downWon = winningIndexSets?.includes(2) ?? false;
-          const principal = getPrincipal();
-          const { pnl } = settleMockTrade(totalAmount, 0, downWon);
-          
-          if (downWon) {
-            logger.info(`DRY RUN: Simulating redeem of ${shortId(conditionId)}. Added $${pnl.toFixed(2)} to Paper Ledger.`);
-            sendExpirationSettlement("WIN", totalAmount, totalAmount, conditionId);
-          } else {
-            logger.warn(`DRY RUN: Redeem simulated. ${shortId(conditionId)} tokens LOST. PnL: $${pnl.toFixed(2)}`);
-            sendExpirationSettlement("LOSS", totalAmount, 0, conditionId);
-          }
-          clearMarketHoldings(conditionId);
-          continue;
-        }
-
-        // Live mode redeem logic continues below
-        const payoutUsd = totalAmount * 1.00;
         await redeemMarket(conditionId);
-        
         const eventSlug = await getEventSlug(conditionId);
-        logRedeem(`REDEEM conditionId=${shortId(conditionId)} eventSlug=${eventSlug ?? ""} tokensRedeemed=${totalAmount} payoutUsd=${payoutUsd}`);
+        logRedeem(`REDEEM conditionId=${shortId(conditionId)} eventSlug=${eventSlug ?? ""} tokensRedeemed=${totalAmount} payoutUsd=${totalAmount}`);
         clearMarketHoldings(conditionId);
         logger.ok(`Redeemed ${shortId(conditionId)}`);
         
-        sendClaimedPrize(totalAmount);
-
+        const principal = await store.getInvestedPrincipal(conditionId) ?? totalAmount;
+        sendOrderResult({
+          side: "redeem",
+          reason: "settlement",
+          soldAmount: totalAmount,
+          realizedPnl: totalAmount - principal,
+          isWin: true,
+          conditionId,
+          eventSlug: eventSlug ?? "",
+        });
       } catch (redeemError) {
         const errorMsg = redeemError instanceof Error ? redeemError.message : String(redeemError);
         if (
           errorMsg.includes("don't hold any winning tokens") ||
           errorMsg.includes("You don't have any tokens")
         ) {
+          const eventSlug = await getEventSlug(conditionId);
           clearMarketHoldings(conditionId);
+          
+          const principal = await store.getInvestedPrincipal(conditionId) ?? 0;
+          sendOrderResult({
+            side: "redeem",
+            reason: "settlement",
+            realizedPnl: -principal,
+            isWin: false,
+            conditionId,
+            eventSlug: eventSlug ?? "",
+          });
         } else {
           logger.error(`Redemption failed: ${errorMsg}`);
         }

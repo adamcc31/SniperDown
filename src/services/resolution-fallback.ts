@@ -50,12 +50,18 @@ export async function forceInstantSettlement(
           `Principal: $${principalToRedeem.toFixed(2)}, PnL: $${pnl.toFixed(2)}`
         );
 
+        const eventSlug = await store.getEventSlug(conditionId);
+
         // Final Telegram Alert
-        await sendOrderResult(
-          `EXPIRATION_${outcome}`,
-          pnl,
-          `Market ${shortId(conditionId)} settled via Oracle.\noutcome=${outcome}\nshares=${shares.toFixed(2)}`
-        );
+        await sendOrderResult({
+          side: "redeem",
+          reason: "settlement",
+          soldAmount: shares,
+          realizedPnl: pnl,
+          isWin: downWon,
+          conditionId,
+          eventSlug: eventSlug ?? ""
+        });
         
         // Final State Cleanup
         clearMarketHoldings(conditionId);

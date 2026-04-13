@@ -15,6 +15,7 @@ export interface WinBotState {
   marketSlugs?: Record<string, string>;
   /** conditionIds where we already bought (one buy per market ever) */
   boughtConditionIds?: string[];
+  investedPrincipal?: Record<string, number>;
 }
 
 function load(): WinBotState {
@@ -100,4 +101,16 @@ export async function markBoughtInMarket(conditionId: string): Promise<void> {
     data.boughtConditionIds.push(conditionId);
     save(data);
   }
+}
+
+export async function getInvestedPrincipal(conditionId: string): Promise<number | null> {
+  const data = load();
+  return data.investedPrincipal?.[conditionId] ?? null;
+}
+
+export async function setInvestedPrincipal(conditionId: string, amount: number): Promise<void> {
+  const data = load();
+  if (!data.investedPrincipal) data.investedPrincipal = {};
+  data.investedPrincipal[conditionId] = amount;
+  save(data);
 }
