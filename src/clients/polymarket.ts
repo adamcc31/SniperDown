@@ -101,7 +101,6 @@ export class PolymarketClient {
         : clobTokenIds.map((x) => String(x));
       upTokenId = ids[0] || null;
       downTokenId = ids[1] || null;
-      logger.info(`Resolved Token IDs for ${event.slug}: UP=${upTokenId}, DOWN=${downTokenId}`);
     }
 
     return {
