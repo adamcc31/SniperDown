@@ -122,7 +122,14 @@ export class WinMonitor {
     if (mayBuy) {
       const currentTime = Math.floor(Date.now() / 1000);
       const ttrSeconds = Number(marketInfo.endTime) - currentTime;
+      logger.info(
+        `Win: TTR countdown ${ttrSeconds}s | Down ${downPrice.toFixed(3)} | Entry band [${triggerPrice}, ${maxBuyPrice}] | Golden Window [${tradingEnv.MIN_TTR_SECONDS}, ${tradingEnv.MAX_TTR_SECONDS}]`
+      );
+
       if (ttrSeconds > tradingEnv.MAX_TTR_SECONDS || ttrSeconds < tradingEnv.MIN_TTR_SECONDS) {
+        logger.skip(
+          `Win: Trade aborted - TTR ${ttrSeconds}s outside Golden Window [${tradingEnv.MIN_TTR_SECONDS}, ${tradingEnv.MAX_TTR_SECONDS}]`
+        );
         return;
       }
 
@@ -158,6 +165,10 @@ export class WinMonitor {
           };
           await store.setPosition(marketInfo.conditionId, position);
         }
+      } else {
+        logger.skip(
+          `Win: Trade aborted - Down ${downPrice.toFixed(3)} not in entry band [${triggerPrice}, ${maxBuyPrice}] at TTR ${ttrSeconds}s`
+        );
       }
     }
 
