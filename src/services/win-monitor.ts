@@ -16,7 +16,6 @@ import type { RealtimePriceService } from "./realtime-price-service";
 import { checkLiquidity } from "../utils/liquidity-guard";
 import { forceInstantSettlement } from "./resolution-fallback";
 import { sendOrderResult } from "./telegram-reporter";
-import * as paperLedger from "../services/paper-ledger";
 
 function getSlugPrefix(): string {
   let raw = tradingEnv.POLYMARKET_SLUG_PREFIX || "";
@@ -195,18 +194,13 @@ export class WinMonitor {
           );
           if (ok) {
             const realizedPnl = shares * currentPrice - costBasis;
-            
-            // Wire the paper ledger for Dry Run
-            if (tradingEnv.DRY_RUN_MODE) {
-              paperLedger.settleMockTrade(shares, currentPrice, undefined, costBasis); 
-            }
 
-            sendOrderResult({
+            await sendOrderResult({
               side: position.side,
               reason,
               soldAmount: shares,
               sellPrice: currentPrice,
-              realizedPnl: realizedPnl,
+              realizedPnl,
               conditionId: marketInfo.conditionId,
               eventSlug: marketInfo.eventSlug,
             });

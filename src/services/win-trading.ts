@@ -15,6 +15,7 @@ import { existsSync, mkdirSync, appendFileSync } from "fs";
 import { resolve } from "path";
 import * as store from "../utils/file-store";
 import { sendOrderExecution } from "./telegram-reporter";
+import * as paperLedger from "./paper-ledger";
 
 const TICK_SIZE = tradingEnv.TICK_SIZE;
 const NEG_RISK = tradingEnv.NEG_RISK;
@@ -125,6 +126,7 @@ export async function buyToken(
       let result: { status?: string; makingAmount?: string; takingAmount?: string };
       if (tradingEnv.DRY_RUN_MODE) {
         logger.info("👻 DRY RUN: Simulating FAK Buy Hit");
+        paperLedger.adjustSimBalance(-amountUsd);
         result = { status: "FILLED", takingAmount: shares.toString() };
       } else {
         try {
@@ -239,6 +241,8 @@ export async function sellToken(
       let result: { status?: string; makingAmount?: string };
       if (tradingEnv.DRY_RUN_MODE) {
         logger.info("👻 DRY RUN: Simulating FAK Sell Hit");
+        const proceeds = amount * sellPrice;
+        paperLedger.adjustSimBalance(proceeds);
         result = { status: "FILLED", makingAmount: amount.toString() };
       } else {
         result = await runWithoutClobRequestLog(() =>

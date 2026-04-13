@@ -62,7 +62,8 @@ async function checkAndRedeemPositions(): Promise<void> {
         const errorMsg = redeemError instanceof Error ? redeemError.message : String(redeemError);
         if (
           errorMsg.includes("don't hold any winning tokens") ||
-          errorMsg.includes("You don't have any tokens")
+          errorMsg.includes("You don't have any tokens") ||
+          errorMsg.includes("No tokens to redeem")
         ) {
           const eventSlug = await getEventSlug(conditionId);
           clearMarketHoldings(conditionId);

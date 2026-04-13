@@ -13,6 +13,10 @@ export function getPaperBalance(): number {
   return simulated_usdc_balance;
 }
 
+export function adjustSimBalance(deltaUsd: number): void {
+  simulated_usdc_balance += deltaUsd;
+}
+
 /** Record the cost basis of the current open trade. */
 export function recordPrincipal(amount: number) {
   currentTradePrincipal = amount;
