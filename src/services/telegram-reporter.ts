@@ -16,6 +16,7 @@ export interface OrderResultPayload {
   reason: "profit_lock" | "stop_loss" | "settlement";
   soldAmount?: number;
   sellPrice?: number;
+  grossProceeds: number;
   realizedPnl: number;
   isWin?: boolean;
   conditionId: string;
@@ -88,7 +89,8 @@ export async function sendOrderResult(payload: OrderResultPayload) {
   await _callTelegramApi(
     `${emoji} Order Result${modeSuffix}\n` +
     `Outcome: ${outcome}\n` +
-    `Realized PnL: ${pnlText}\n` +
+    `Gross Payout: $${payload.grossProceeds.toFixed(4)}\n` +
+    `Net PnL: ${pnlText}\n` +
     `Details: Side: ${payload.side}, Reason: ${payload.reason}` +
     simBalanceLine
   );

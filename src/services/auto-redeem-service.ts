@@ -12,7 +12,7 @@ import { resolve } from "path";
 import { sendOrderResult } from "./telegram-reporter";
 import * as store from "../utils/file-store";
 import * as paperLedger from "./paper-ledger";
-import { realizedPnlWin } from "./sim-math";
+import { realizedPnlWin, realizedPnlLoss } from "./sim-math";
 
 const REDEEM_INTERVAL_MS = 160 * 1000;
 const LOG_DIR = resolve(process.cwd(), "log");
@@ -51,16 +51,21 @@ async function checkAndRedeemPositions(): Promise<void> {
         logger.ok(`Redeemed ${shortId(conditionId)}`);
         
         const principal = await store.getInvestedPrincipal(conditionId) ?? totalAmount;
-        const realizedPnl = realizedPnlWin(totalAmount, principal);
+        const downWon = winningIndexSets?.includes(2) ?? false;
+        const grossProceeds = downWon ? (totalAmount * 1.0) : 0;
+        const realizedPnl = downWon
+          ? realizedPnlWin(totalAmount, principal)
+          : realizedPnlLoss(principal);
         if (tradingEnv.DRY_RUN_MODE) {
-          paperLedger.adjustSimBalance(realizedPnl);
+          paperLedger.adjustSimBalance(grossProceeds);
         }
         await sendOrderResult({
           side: "redeem",
           reason: "settlement",
           soldAmount: totalAmount,
+          grossProceeds,
           realizedPnl,
-          isWin: true,
+          isWin: downWon,
           conditionId,
           eventSlug: eventSlug ?? "",
         });

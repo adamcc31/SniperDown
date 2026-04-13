@@ -43,6 +43,7 @@ async function verifyLedgerWiring() {
     reason: "profit_lock",
     soldAmount: shares,
     sellPrice: exitPrice,
+    grossProceeds: shares * exitPrice,
     realizedPnl: expectedPnl,
     conditionId: "cid-test",
     eventSlug: "slug-test"

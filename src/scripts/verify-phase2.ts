@@ -57,6 +57,7 @@ async function testTelemetry() {
     reason: "profit_lock",
     soldAmount: shares,
     sellPrice: sellPrice,
+    grossProceeds: shares * sellPrice,
     realizedPnl: pnl,
     conditionId: "test-cid",
     eventSlug: "test-slug"
@@ -67,6 +68,7 @@ async function testTelemetry() {
   await sendOrderResult({
     side: "redeem",
     reason: "settlement",
+    grossProceeds: 15,
     realizedPnl: 5,
     isWin: true,
     conditionId: "test-cid",
@@ -76,6 +78,7 @@ async function testTelemetry() {
   await sendOrderResult({
     side: "redeem",
     reason: "settlement",
+    grossProceeds: 0,
     realizedPnl: -10,
     isWin: false,
     conditionId: "test-cid",

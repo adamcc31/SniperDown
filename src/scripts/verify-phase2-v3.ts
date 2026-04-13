@@ -59,6 +59,7 @@ async function verifyPnLCalculation() {
     reason: "profit_lock",
     soldAmount: shares,
     sellPrice: sellPrice,
+    grossProceeds: shares * sellPrice,
     realizedPnl: expectedPnl,
     conditionId: "cid1",
     eventSlug: "slug1"

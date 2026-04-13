@@ -205,7 +205,7 @@ export class WinMonitor {
             // 1. Update the Paper Ledger if in Dry Run
             if (tradingEnv.DRY_RUN_MODE) {
               if (paperLedger.adjustSimBalance) {
-                paperLedger.adjustSimBalance(realizedPnl);
+                paperLedger.adjustSimBalance(grossProceeds);
               } else {
                 logger.warn("paperLedger.adjustSimBalance not implemented, sim balance will not update.");
               }
@@ -217,6 +217,7 @@ export class WinMonitor {
               reason: reason,
               soldAmount: shares,
               sellPrice: simulatedExitPrice,
+              grossProceeds,
               realizedPnl: realizedPnl,
               isWin: realizedPnl >= 0,
               conditionId: marketInfo.conditionId,

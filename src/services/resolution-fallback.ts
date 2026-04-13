@@ -7,10 +7,11 @@
 
 import { isMarketResolved } from "../utils/redeem";
 import { clearMarketHoldings } from "../utils/holdings";
-import { settleMockTrade } from "./paper-ledger";
+import { adjustSimBalance } from "./paper-ledger";
 import { sendOrderResult } from "./telegram-reporter";
 import { logger, shortId } from "../logger";
 import * as store from "../utils/file-store";
+import { realizedPnlWin, realizedPnlLoss } from "./sim-math";
 
 const INITIAL_POLL_DELAY_MS = 30_000;    
 const MAX_POLL_INTERVAL_MS = 600_000;   // Max 10 mins between polls
@@ -42,8 +43,11 @@ export async function forceInstantSettlement(
         // DOWN token = clobTokenIds[1] = outcome slot 1 = indexSet 2
         const downWon = winningIndexSets?.includes(2) ?? false;
         const outcome = downWon ? "WIN" : "LOSS";
-        
-        const { pnl } = settleMockTrade(shares, 0, downWon, principalToRedeem);
+        const grossProceeds = downWon ? (shares * 1.0) : 0;
+        const pnl = downWon
+          ? realizedPnlWin(shares, principalToRedeem)
+          : realizedPnlLoss(principalToRedeem);
+        adjustSimBalance(grossProceeds);
         
         logger.ok(
           `Resolution Confirmed: ${shortId(conditionId)} → ${outcome}. ` +
@@ -57,6 +61,7 @@ export async function forceInstantSettlement(
           side: "redeem",
           reason: "settlement",
           soldAmount: shares,
+          grossProceeds,
           realizedPnl: pnl,
           isWin: downWon,
           conditionId,
