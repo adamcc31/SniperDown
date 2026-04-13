@@ -67,7 +67,7 @@ export class WinMonitor {
         const oldShares = Object.values(oldTokenHoldings).reduce((sum, val) => sum + val, 0);
         const oldPrincipal = await store.getInvestedPrincipal(oldConditionId) ?? tradingEnv.BUY_AMOUNT_USD;
 
-        if (oldShares > 0) {
+        if (oldShares > 0.01) {
           forceInstantSettlement(oldConditionId, oldShares, oldPrincipal)
             .catch(err => logger.error("[Settlement] Background error", err));
         }
@@ -114,7 +114,7 @@ export class WinMonitor {
     const upShares = getHoldings(marketInfo.conditionId, marketInfo.upTokenId!);
     const downShares = getHoldings(marketInfo.conditionId, marketInfo.downTokenId!);
     const alreadyBoughtInMarket = await store.hasBoughtInMarket(marketInfo.conditionId);
-    const hasPositionOrHoldings = position !== null || upShares > 0 || downShares > 0;
+    const hasPositionOrHoldings = position !== null || upShares > 0.01 || downShares > 0.01;
     const mayBuy = !alreadyBoughtInMarket && !hasPositionOrHoldings;
 
     if (mayBuy) {
@@ -186,7 +186,7 @@ export class WinMonitor {
     }
 
     if (!position) {
-      if (upShares > 0) {
+      if (upShares > 0.01) {
         position = {
           conditionId: marketInfo.conditionId,
           side: "Up",
@@ -196,7 +196,7 @@ export class WinMonitor {
           boughtAt: 0,
         };
         await store.setPosition(marketInfo.conditionId, position);
-      } else if (downShares > 0) {
+      } else if (downShares > 0.01) {
         position = {
           conditionId: marketInfo.conditionId,
           side: "Down",

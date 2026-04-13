@@ -259,9 +259,9 @@ export async function sellToken(
       if (isSuccess) {
         let soldAmount = result.makingAmount ? parseFloat(result.makingAmount) : amount;
         if (soldAmount >= 1e6) soldAmount = soldAmount / 1e6;
-        const reduced = reduceHoldings(conditionId, tokenId, soldAmount);
+        const reduced = reduceHoldings(conditionId, tokenId, amount);
         logTrade(`SELL_FILLED conditionId=${shortId(conditionId)} side=${side} reason=${reason} sold=${reduced.toFixed(4)}`);
-        logger.ok(`SELL ${side} (${reason}): ${reduced.toFixed(2)} tokens`);
+        logger.ok(`SELL ${side} (${reason}): ${reduced.toFixed(2)} tokens (dust sweep)`);
         return true;
       }
       logger.error("SELL: order not filled");
