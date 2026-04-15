@@ -114,3 +114,11 @@ export async function setInvestedPrincipal(conditionId: string, amount: number):
   data.investedPrincipal[conditionId] = amount;
   save(data);
 }
+
+export async function addInvestedPrincipal(conditionId: string, amount: number): Promise<void> {
+  const data = load();
+  if (!data.investedPrincipal) data.investedPrincipal = {};
+  const current = data.investedPrincipal[conditionId] || 0;
+  data.investedPrincipal[conditionId] = current + amount;
+  save(data);
+}

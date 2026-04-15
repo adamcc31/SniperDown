@@ -33,6 +33,7 @@ function getSlugPrefix(): string {
 
 export class WinMonitor {
   private lastConditionId: string | null = null;
+  private isExecutingTrade = false;
 
   constructor(
     private polymarket: PolymarketClient,
@@ -120,6 +121,11 @@ export class WinMonitor {
     const mayBuy = !alreadyBoughtInMarket && !hasPositionOrHoldings;
 
     if (mayBuy) {
+      if (this.isExecutingTrade) {
+        logger.skip(`Win: Trade already in flight (locked). Skipping buy evaluation for ${marketInfo.conditionId}`);
+        return;
+      }
+
       const currentTime = Math.floor(Date.now() / 1000);
       const ttrSeconds = Number(marketInfo.endTime) - currentTime;
       logger.info(
@@ -146,24 +152,31 @@ export class WinMonitor {
           return;
         }
 
-        const ok = await buyToken(
-          marketInfo.downTokenId!,
-          "Down",
-          buyAmountUsd,
-          marketInfo
-        );
-        if (ok) {
-          await store.markBoughtInMarket(marketInfo.conditionId);
-          const shares = getHoldings(marketInfo.conditionId, marketInfo.downTokenId!);
-          position = {
-            conditionId: marketInfo.conditionId,
-            side: "Down",
-            tokenId: marketInfo.downTokenId!,
-            buyPrice: downPrice,
-            shares,
-            boughtAt: Math.floor(Date.now() / 1000),
-          };
-          await store.setPosition(marketInfo.conditionId, position);
+        this.isExecutingTrade = true;
+        try {
+          const ok = await buyToken(
+            marketInfo.downTokenId!,
+            "Down",
+            buyAmountUsd,
+            marketInfo
+          );
+          if (ok) {
+            await store.markBoughtInMarket(marketInfo.conditionId);
+            const shares = getHoldings(marketInfo.conditionId, marketInfo.downTokenId!);
+            position = {
+              conditionId: marketInfo.conditionId,
+              side: "Down",
+              tokenId: marketInfo.downTokenId!,
+              buyPrice: downPrice,
+              shares,
+              boughtAt: Math.floor(Date.now() / 1000),
+            };
+            await store.setPosition(marketInfo.conditionId, position);
+          }
+        } catch (err) {
+          logger.error(`Win: Buy execution failed for ${marketInfo.conditionId}`, err);
+        } finally {
+          this.isExecutingTrade = false;
         }
       } else {
         logger.skip(

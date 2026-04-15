@@ -169,7 +169,7 @@ export async function buyToken(
         logTrade(`BUY_FILLED conditionId=${shortId(marketInfo.conditionId)} side=${side} shares=${tokensReceived.toFixed(4)}`);
         logger.ok(`BUY ${side}: ${tokensReceived.toFixed(2)} shares`);
         
-        await store.setInvestedPrincipal(marketInfo.conditionId, amountUsd);
+        await store.addInvestedPrincipal(marketInfo.conditionId, amountUsd);
         const fillPriceForReport = tradingEnv.DRY_RUN_MODE ? dryRunFillPrice : orderPrice;
         await sendOrderExecution({
           side,
