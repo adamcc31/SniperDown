@@ -194,6 +194,7 @@ export async function buyToken(
 
 /**
  * Market sell (e.g. profit lock at 0.99 or stop loss at Y). Sell price uses best bid.
+ * @param attemptCount — consecutive sell failures for this exit; drives adaptive pricing.
  */
 export async function sellToken(
   tokenId: string,
@@ -202,7 +203,8 @@ export async function sellToken(
   eventSlug: string,
   side: "Up" | "Down",
   reason: "profit_lock" | "stop_loss",
-  getBestBid: (tid: string) => number | null
+  getBestBid: (tid: string) => number | null,
+  attemptCount: number = 0
 ): Promise<boolean> {
   const privateKey = tradingEnv.PRIVATE_KEY;
   if (!privateKey) {
@@ -212,9 +214,11 @@ export async function sellToken(
   if (shares <= 0) return false;
 
   return withCredentialRetry(async () => {
+    let bestBid: number | null = null;
+    let sellPrice: number | undefined;
     try {
       const client = await getClobClient();
-      let bestBid: number | null = getBestBid(tokenId);
+      bestBid = getBestBid(tokenId);
       if (bestBid == null || bestBid <= 0) {
         try {
           const priceResp = await client.getPrice(tokenId, "SELL");
@@ -232,17 +236,32 @@ export async function sellToken(
         logger.error("Sell: could not get bid for token");
         return false;
       }
-      let sellPrice: number;
       const tick = parseFloat(TICK_SIZE) || 0.01;
 
       if (tradingEnv.DRY_RUN_MODE) {
         sellPrice = simulateSellFillPrice(bestBid);
       } else if (reason === "profit_lock") {
-        // 2 ticks (cents) below best bid. Aggressive enough to fill, safe enough to pass filters.
-        sellPrice = clampPrice(Math.max(bestBid - (tick * 2), tick));
+        // THE HAMMER STRATEGY — Adaptive sell pricing for aggressive profit locks.
+        // At extreme highs (bid >= 0.95), subtracting ticks triggers CLOB price-band
+        // rejection. Use bestBid directly — FAK sweeps resting limit bids at-or-above.
+        if (bestBid >= 0.95) {
+          sellPrice = clampPrice(bestBid);
+        } else {
+          // Moderate prices: attempt 0 tries exactly at bid; subsequent attempts
+          // step down by 1 tick to hunt for deeper liquidity.
+          if (attemptCount === 0) {
+            sellPrice = clampPrice(bestBid);
+          } else {
+            sellPrice = clampPrice(Math.max(bestBid - tick, tick));
+          }
+        }
       } else if (reason === "stop_loss") {
-        // 3 ticks (cents) below best bid.
-        sellPrice = clampPrice(Math.max(bestBid - (tick * 3), tick));
+        // At extreme lows (bid <= 0.10), use bid directly to avoid absurd deviation.
+        if (bestBid <= 0.10) {
+          sellPrice = clampPrice(bestBid);
+        } else {
+          sellPrice = clampPrice(Math.max(bestBid - tick, tick));
+        }
       } else {
         sellPrice = clampPrice(Math.max(bestBid - tick, tick));
       }
@@ -264,8 +283,8 @@ export async function sellToken(
         amount,
         price: sellPrice,
       };
-      logger.sell(`SELL ${side} ${reason}: ${amount.toFixed(2)} shares @ ${sellPrice.toFixed(3)} (bid ${bestBid.toFixed(3)})`);
-      logTrade(`SELL conditionId=${shortId(conditionId)} eventSlug=${eventSlug} side=${side} reason=${reason} shares=${amount} price=${sellPrice.toFixed(4)} bid=${bestBid.toFixed(4)}`);
+      logger.sell(`SELL ${side} ${reason}: ${amount.toFixed(2)} shares @ ${sellPrice.toFixed(3)} (bid ${bestBid.toFixed(3)}) [attempt #${attemptCount}]`);
+      logTrade(`SELL conditionId=${shortId(conditionId)} eventSlug=${eventSlug} side=${side} reason=${reason} shares=${amount} price=${sellPrice.toFixed(4)} bid=${bestBid.toFixed(4)} attempt=${attemptCount}`);
       let result: { status?: string; makingAmount?: string };
       if (tradingEnv.DRY_RUN_MODE) {
         logger.info("👻 DRY RUN: Simulating FAK Sell Hit");
@@ -300,10 +319,20 @@ export async function sellToken(
       const errMsg = err instanceof Error ? err.message : String(err);
       // Extract Axios/API data if it exists
       const errData = (err as any)?.response?.data ?? (err as any)?.data ?? "";
+      const dataError = (err as any)?.response?.data?.error ?? "";
       const apiLog = errData ? ` | API Data: ${JSON.stringify(errData)}` : "";
 
-      logger.error(`SELL FAIL: ${errMsg}${apiLog}`);
-      logTrade(`SELL_FAIL conditionId=${shortId(conditionId)} side=${side} reason=${reason} error=${errMsg}`);
+      // Detect FAK-specific rejections for proper retry classification
+      const isFakRejection = /no orders found to match|FAK order.*killed|FAK.*partially filled or killed|order not filled/i.test(errMsg)
+        || /no orders found|FAK.*killed/i.test(String(dataError));
+
+      if (isFakRejection) {
+        logger.warn(`SELL FAK KILLED (${reason}): @ ${sellPrice?.toFixed(3) ?? "?"} (bid ${bestBid?.toFixed(3) ?? "?"}) [attempt #${attemptCount}]${apiLog}`);
+        logTrade(`SELL_FAK_KILLED conditionId=${shortId(conditionId)} reason=${reason} price=${sellPrice?.toFixed(4) ?? "?"} bid=${bestBid?.toFixed(4) ?? "?"} attempt=${attemptCount}`);
+      } else {
+        logger.error(`SELL FAIL: ${errMsg}${apiLog}`);
+        logTrade(`SELL_FAIL conditionId=${shortId(conditionId)} side=${side} reason=${reason} error=${errMsg}`);
+      }
       return false;
     }
   });

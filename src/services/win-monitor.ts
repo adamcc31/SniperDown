@@ -35,8 +35,12 @@ export class WinMonitor {
   private lastConditionId: string | null = null;
   private isExecutingTrade = false;
   private isCheckingExit = false;
+  private isExecutingSell = false;
   private lastExitAttemptTime = 0;
-  private readonly EXIT_COOLDOWN_MS = 2000;
+  private exitCooldownMs = 2000;
+  private readonly BASE_COOLDOWN_MS = 2000;
+  private readonly MAX_STOPLOSS_COOLDOWN_MS = 30000;
+  private consecutiveSellFailures = 0;
 
   constructor(
     private polymarket: PolymarketClient,
@@ -209,61 +213,93 @@ export class WinMonitor {
         await store.setPosition(marketInfo.conditionId, null);
       } else {
         const getBestBid = (tid: string) => this.realtimePriceService?.getBestBid(tid) ?? null;
-        if (currentPrice >= profitLockPrice || currentPrice <= stopLossPrice) {
+        // Use best bid for exit evaluation — this is the price we'll actually receive.
+        // Clamp to 0.99 to prevent the $1.00 impossibility from triggering phantom exits.
+        const bidForExit = this.realtimePriceService?.getBestBid(position.tokenId) ?? currentPrice;
+        const evalPrice = Math.min(bidForExit, 0.99);
+
+        if (evalPrice >= profitLockPrice || evalPrice <= stopLossPrice) {
+          // Hard sell lock — prevents dual-path collision with onPriceUpdate
+          if (this.isExecutingSell) return;
           const now = Date.now();
-          if (now - this.lastExitAttemptTime < this.EXIT_COOLDOWN_MS) {
+          if (now - this.lastExitAttemptTime < this.exitCooldownMs) {
             return;
           }
-          const reason = currentPrice >= profitLockPrice ? "profit_lock" : "stop_loss";
+          const reason = evalPrice >= profitLockPrice ? "profit_lock" : "stop_loss";
           
           const storedPrincipal = await store.getInvestedPrincipal(
             marketInfo.conditionId
           );
           const costBasis = storedPrincipal ?? ((position.buyPrice * shares) || tradingEnv.BUY_AMOUNT_USD);
 
-          logger.info(`Win: ${reason} ${currentPrice.toFixed(3)}, selling ${position.side}`);
-          this.lastExitAttemptTime = Date.now();
-          const ok = await sellToken(
-            position.tokenId,
-            shares,
-            marketInfo.conditionId,
-            marketInfo.eventSlug,
-            position.side,
-            reason,
-            getBestBid
-          );
-          if (ok) {
-            const bestBid = getBestBid(position.tokenId) ?? currentPrice;
-            const simulatedExitPrice = tradingEnv.DRY_RUN_MODE
-              ? simulateSellFillPrice(bestBid)
-              : bestBid;
-            const grossProceeds = simulateGrossProceeds(shares, simulatedExitPrice);
-            const realizedPnl = realizedPnlFromClobExit(grossProceeds, costBasis);
+          logger.info(`Win: ${reason} @ bid ${evalPrice.toFixed(3)} (ask ${currentPrice.toFixed(3)}), selling ${position.side} [attempt #${this.consecutiveSellFailures}]`);
+          this.isExecutingSell = true;
+          try {
+            this.lastExitAttemptTime = Date.now();
+            const ok = await sellToken(
+              position.tokenId,
+              shares,
+              marketInfo.conditionId,
+              marketInfo.eventSlug,
+              position.side,
+              reason,
+              getBestBid,
+              this.consecutiveSellFailures
+            );
+            if (ok) {
+              // Reset cooldown state on success
+              this.consecutiveSellFailures = 0;
+              this.exitCooldownMs = this.BASE_COOLDOWN_MS;
 
-            // 1. Update the Paper Ledger if in Dry Run
-            if (tradingEnv.DRY_RUN_MODE) {
-              if (paperLedger.adjustSimBalance) {
-                paperLedger.adjustSimBalance(grossProceeds);
+              const bestBid = getBestBid(position.tokenId) ?? currentPrice;
+              const simulatedExitPrice = tradingEnv.DRY_RUN_MODE
+                ? simulateSellFillPrice(bestBid)
+                : bestBid;
+              const grossProceeds = simulateGrossProceeds(shares, simulatedExitPrice);
+              const realizedPnl = realizedPnlFromClobExit(grossProceeds, costBasis);
+
+              // 1. Update the Paper Ledger if in Dry Run
+              if (tradingEnv.DRY_RUN_MODE) {
+                if (paperLedger.adjustSimBalance) {
+                  paperLedger.adjustSimBalance(grossProceeds);
+                } else {
+                  logger.warn("paperLedger.adjustSimBalance not implemented, sim balance will not update.");
+                }
+              }
+
+              // 2. Await Telegram Alert
+              await sendOrderResult({
+                side: position.side,
+                reason: reason,
+                soldAmount: shares,
+                sellPrice: simulatedExitPrice,
+                grossProceeds,
+                realizedPnl: realizedPnl,
+                isWin: realizedPnl >= 0,
+                conditionId: marketInfo.conditionId,
+                eventSlug: marketInfo.eventSlug,
+              });
+
+              // 3. Clear the position
+              await store.setPosition(marketInfo.conditionId, null);
+            } else {
+              // BIMODAL COOLDOWN: Hammer for profit_lock, backoff for stop_loss
+              this.consecutiveSellFailures++;
+              if (reason === "profit_lock") {
+                // THE HAMMER — keep interval short to aggressively retry
+                this.exitCooldownMs = this.BASE_COOLDOWN_MS;
+                logger.warn(`[Hammer] profit_lock attempt #${this.consecutiveSellFailures} failed. Retrying in ${this.exitCooldownMs}ms.`);
               } else {
-                logger.warn("paperLedger.adjustSimBalance not implemented, sim balance will not update.");
+                // STOP LOSS — exponential backoff to avoid spamming illiquid markets
+                this.exitCooldownMs = Math.min(
+                  this.BASE_COOLDOWN_MS * Math.pow(2, this.consecutiveSellFailures),
+                  this.MAX_STOPLOSS_COOLDOWN_MS
+                );
+                logger.warn(`[StopLoss] attempt #${this.consecutiveSellFailures} failed. Backoff cooldown: ${this.exitCooldownMs}ms.`);
               }
             }
-
-            // 2. Await Telegram Alert
-            await sendOrderResult({
-              side: position.side,
-              reason: reason,
-              soldAmount: shares,
-              sellPrice: simulatedExitPrice,
-              grossProceeds,
-              realizedPnl: realizedPnl,
-              isWin: realizedPnl >= 0,
-              conditionId: marketInfo.conditionId,
-              eventSlug: marketInfo.eventSlug,
-            });
-
-            // 3. Clear the position
-            await store.setPosition(marketInfo.conditionId, null);
+          } finally {
+            this.isExecutingSell = false;
           }
         } else {
           await store.setPosition(marketInfo.conditionId, { ...position, shares: getHoldings(marketInfo.conditionId, position.tokenId) });
@@ -302,18 +338,24 @@ export class WinMonitor {
       const profitLockPrice = tradingEnv.PROFIT_LOCK_PRICE;
       const stopLossPrice = tradingEnv.STOP_LOSS_PRICE;
 
-      if (currentPrice >= profitLockPrice || currentPrice <= stopLossPrice) {
+      // Use best bid for exit evaluation — clamp to 0.99 (the $1.00 impossibility fix)
+      const bidForExit = this.realtimePriceService?.getBestBid(position.tokenId) ?? currentPrice;
+      const evalPrice = Math.min(bidForExit, 0.99);
+
+      if (evalPrice >= profitLockPrice || evalPrice <= stopLossPrice) {
+        // Hard sell lock — prevents dual-path collision with processCycle
+        if (this.isExecutingSell) return;
         const now = Date.now();
-        if (now - this.lastExitAttemptTime < this.EXIT_COOLDOWN_MS) {
+        if (now - this.lastExitAttemptTime < this.exitCooldownMs) {
           return;
         }
-        const reason = currentPrice >= profitLockPrice ? "profit_lock" : "stop_loss";
+        const reason = evalPrice >= profitLockPrice ? "profit_lock" : "stop_loss";
         
         // Guard: avoid double-sell
         const latestPosition = await store.getPosition(conditionId);
         if (!latestPosition) return;
 
-        logger.info(`[onPriceUpdate] ${reason} triggered @ ${currentPrice.toFixed(3)} (position: ${position.side})`);
+        logger.info(`[onPriceUpdate] ${reason} triggered @ bid ${evalPrice.toFixed(3)} (ask ${currentPrice.toFixed(3)}, position: ${position.side}) [attempt #${this.consecutiveSellFailures}]`);
         
         const storedPrincipal = await store.getInvestedPrincipal(conditionId);
         const costBasis = storedPrincipal ?? ((position.buyPrice * shares) || tradingEnv.BUY_AMOUNT_USD);
@@ -322,42 +364,65 @@ export class WinMonitor {
         
         const eventSlug = await store.getEventSlug(conditionId) ?? "";
 
-        this.lastExitAttemptTime = Date.now();
-        const ok = await sellToken(
-          position.tokenId,
-          shares,
-          conditionId,
-          eventSlug,
-          position.side,
-          reason,
-          getBestBid
-        );
-
-        if (ok) {
-          const bestBid = getBestBid(position.tokenId) ?? currentPrice;
-          const simulatedExitPrice = tradingEnv.DRY_RUN_MODE
-            ? simulateSellFillPrice(bestBid)
-            : bestBid;
-          const grossProceeds = simulateGrossProceeds(shares, simulatedExitPrice);
-          const realizedPnl = realizedPnlFromClobExit(grossProceeds, costBasis);
-
-          if (tradingEnv.DRY_RUN_MODE && paperLedger.adjustSimBalance) {
-            paperLedger.adjustSimBalance(grossProceeds);
-          }
-
-          await sendOrderResult({
-            side: position.side,
-            reason,
-            soldAmount: shares,
-            sellPrice: simulatedExitPrice,
-            grossProceeds,
-            realizedPnl,
-            isWin: realizedPnl >= 0,
+        this.isExecutingSell = true;
+        try {
+          this.lastExitAttemptTime = Date.now();
+          const ok = await sellToken(
+            position.tokenId,
+            shares,
             conditionId,
             eventSlug,
-          });
+            position.side,
+            reason,
+            getBestBid,
+            this.consecutiveSellFailures
+          );
 
-          await store.setPosition(conditionId, null);
+          if (ok) {
+            // Reset cooldown state on success
+            this.consecutiveSellFailures = 0;
+            this.exitCooldownMs = this.BASE_COOLDOWN_MS;
+
+            const bestBid = getBestBid(position.tokenId) ?? currentPrice;
+            const simulatedExitPrice = tradingEnv.DRY_RUN_MODE
+              ? simulateSellFillPrice(bestBid)
+              : bestBid;
+            const grossProceeds = simulateGrossProceeds(shares, simulatedExitPrice);
+            const realizedPnl = realizedPnlFromClobExit(grossProceeds, costBasis);
+
+            if (tradingEnv.DRY_RUN_MODE && paperLedger.adjustSimBalance) {
+              paperLedger.adjustSimBalance(grossProceeds);
+            }
+
+            await sendOrderResult({
+              side: position.side,
+              reason,
+              soldAmount: shares,
+              sellPrice: simulatedExitPrice,
+              grossProceeds,
+              realizedPnl,
+              isWin: realizedPnl >= 0,
+              conditionId,
+              eventSlug,
+            });
+
+            await store.setPosition(conditionId, null);
+          } else {
+            // BIMODAL COOLDOWN: Hammer for profit_lock, backoff for stop_loss
+            this.consecutiveSellFailures++;
+            if (reason === "profit_lock") {
+              this.exitCooldownMs = this.BASE_COOLDOWN_MS;
+              logger.warn(`[Hammer] profit_lock attempt #${this.consecutiveSellFailures} failed. Retrying in ${this.exitCooldownMs}ms.`);
+            } else {
+              this.exitCooldownMs = Math.min(
+                this.BASE_COOLDOWN_MS * Math.pow(2, this.consecutiveSellFailures),
+                this.MAX_STOPLOSS_COOLDOWN_MS
+              );
+              logger.warn(`[StopLoss] attempt #${this.consecutiveSellFailures} failed. Backoff cooldown: ${this.exitCooldownMs}ms.`);
+            }
+          }
+        } finally {
+          this.isExecutingSell = false;
         }
       }
     } finally {
