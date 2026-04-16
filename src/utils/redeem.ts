@@ -241,20 +241,12 @@ export async function getUserTokenBalances(
   const balances = new Map<number, BigNumber>();
   const parentId = "0x0000000000000000000000000000000000000000000000000000000000000000";
 
-  try {
-    const outcomeSlotCount = (await ctf.getOutcomeSlotCount(conditionIdBytes32)).toNumber();
-    for (let i = 1; i <= outcomeSlotCount; i++) {
-      try {
-        const collectionId = await ctf.getCollectionId(parentId, conditionIdBytes32, i);
-        const positionId = await ctf.getPositionId(config.collateral, collectionId);
-        const balance = await ctf.balanceOf(walletAddress, positionId);
-        if (!balance.isZero()) balances.set(i, balance);
-      } catch {
-        //
-      }
-    }
-  } catch {
-    //
+  const outcomeSlotCount = (await ctf.getOutcomeSlotCount(conditionIdBytes32)).toNumber();
+  for (let i = 1; i <= outcomeSlotCount; i++) {
+    const collectionId = await ctf.getCollectionId(parentId, conditionIdBytes32, i);
+    const positionId = await ctf.getPositionId(config.collateral, collectionId);
+    const balance = await ctf.balanceOf(walletAddress, positionId);
+    if (!balance.isZero()) balances.set(i, balance);
   }
   return balances;
 }

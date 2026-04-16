@@ -232,9 +232,10 @@ export async function sellToken(
         logger.error("Sell: could not get bid for token");
         return false;
       }
+      const slippage = reason === "stop_loss" ? 0.50 : 0.98;
       const sellPrice = tradingEnv.DRY_RUN_MODE
         ? simulateSellFillPrice(bestBid)
-        : clampPrice(Math.max(bestBid * 0.98, parseFloat(TICK_SIZE)));
+        : clampPrice(Math.max(bestBid * slippage, parseFloat(TICK_SIZE)));
       const amount = Math.floor(shares * 100) / 100;
       if (amount <= 0) return false;
       const marketOrder = {

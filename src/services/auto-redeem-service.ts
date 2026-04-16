@@ -72,11 +72,11 @@ async function checkAndRedeemPositions(): Promise<void> {
       } catch (redeemError) {
         const errorMsg = redeemError instanceof Error ? redeemError.message : String(redeemError);
         if (
-          errorMsg.includes("don't hold any winning tokens") ||
-          errorMsg.includes("You don't have any tokens") ||
-          errorMsg.includes("No tokens to redeem")
+          errorMsg.includes("No tokens to redeem") ||
+          errorMsg.includes("No winning tokens")
         ) {
           clearMarketHoldings(conditionId);
+          logger.info(`Cleared holdings for ${shortId(conditionId)} (verified zero balance)`);
         } else {
           logger.error(`Redemption failed: ${errorMsg}`);
         }
