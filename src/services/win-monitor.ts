@@ -34,6 +34,7 @@ function getSlugPrefix(): string {
 export class WinMonitor {
   private lastConditionId: string | null = null;
   private isExecutingTrade = false;
+  private isCheckingExit = false;
 
   constructor(
     private polymarket: PolymarketClient,
@@ -275,5 +276,80 @@ export class WinMonitor {
       marketStartTime: marketInfo.startTime,
       marketEndTime: marketInfo.endTime,
     });
+  }
+
+  async onPriceUpdate(upPrice: number, downPrice: number): Promise<void> {
+    if (this.isCheckingExit) return;
+    this.isCheckingExit = true;
+    try {
+      const conditionId = this.lastConditionId;
+      if (!conditionId) return;
+
+      const position = await store.getPosition(conditionId);
+      if (!position) return;
+
+      const currentPrice = position.side === "Up" ? upPrice : downPrice;
+      const shares = getHoldings(conditionId, position.tokenId);
+      if (shares <= 0) return;
+
+      const profitLockPrice = tradingEnv.PROFIT_LOCK_PRICE;
+      const stopLossPrice = tradingEnv.STOP_LOSS_PRICE;
+
+      if (currentPrice >= profitLockPrice || currentPrice <= stopLossPrice) {
+        const reason = currentPrice >= profitLockPrice ? "profit_lock" : "stop_loss";
+        
+        // Guard: avoid double-sell
+        const latestPosition = await store.getPosition(conditionId);
+        if (!latestPosition) return;
+
+        logger.info(`[onPriceUpdate] ${reason} triggered @ ${currentPrice.toFixed(3)} (position: ${position.side})`);
+        
+        const storedPrincipal = await store.getInvestedPrincipal(conditionId);
+        const costBasis = storedPrincipal ?? ((position.buyPrice * shares) || tradingEnv.BUY_AMOUNT_USD);
+        
+        const getBestBid = (tid: string) => this.realtimePriceService?.getBestBid(tid) ?? null;
+        
+        const eventSlug = await store.getEventSlug(conditionId) ?? "";
+
+        const ok = await sellToken(
+          position.tokenId,
+          shares,
+          conditionId,
+          eventSlug,
+          position.side,
+          reason,
+          getBestBid
+        );
+
+        if (ok) {
+          const bestBid = getBestBid(position.tokenId) ?? currentPrice;
+          const simulatedExitPrice = tradingEnv.DRY_RUN_MODE
+            ? simulateSellFillPrice(bestBid)
+            : bestBid;
+          const grossProceeds = simulateGrossProceeds(shares, simulatedExitPrice);
+          const realizedPnl = realizedPnlFromClobExit(grossProceeds, costBasis);
+
+          if (tradingEnv.DRY_RUN_MODE && paperLedger.adjustSimBalance) {
+            paperLedger.adjustSimBalance(grossProceeds);
+          }
+
+          await sendOrderResult({
+            side: position.side,
+            reason,
+            soldAmount: shares,
+            sellPrice: simulatedExitPrice,
+            grossProceeds,
+            realizedPnl,
+            isWin: realizedPnl >= 0,
+            conditionId,
+            eventSlug,
+          });
+
+          await store.setPosition(conditionId, null);
+        }
+      }
+    } finally {
+      this.isCheckingExit = false;
+    }
   }
 }

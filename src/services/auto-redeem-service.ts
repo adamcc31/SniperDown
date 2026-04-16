@@ -31,7 +31,11 @@ async function checkAndRedeemPositions(): Promise<void> {
 
   const holdings = getAllHoldings();
   const marketIds = Object.keys(holdings);
-  if (marketIds.length === 0) return;
+  if (marketIds.length === 0) {
+    logger.skip("Auto-redeem: no active holdings to check");
+    return;
+  }
+  logger.info(`Auto-redeem: checking ${marketIds.length} market(s): ${marketIds.map(id => shortId(id)).join(", ")}`);
 
   for (const conditionId of marketIds) {
     const tokens = holdings[conditionId];
@@ -78,7 +82,7 @@ async function checkAndRedeemPositions(): Promise<void> {
           clearMarketHoldings(conditionId);
           logger.info(`Cleared holdings for ${shortId(conditionId)} (verified zero balance)`);
         } else {
-          logger.error(`Redemption failed: ${errorMsg}`);
+          logger.error(`[AutoRedeem] redeemMarket failed for ${shortId(conditionId)}: ${errorMsg}`);
         }
       }
     } catch (error) {

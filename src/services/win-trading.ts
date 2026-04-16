@@ -232,10 +232,25 @@ export async function sellToken(
         logger.error("Sell: could not get bid for token");
         return false;
       }
-      const slippage = reason === "stop_loss" ? 0.50 : 0.98;
-      const sellPrice = tradingEnv.DRY_RUN_MODE
-        ? simulateSellFillPrice(bestBid)
-        : clampPrice(Math.max(bestBid * slippage, parseFloat(TICK_SIZE)));
+      let sellPrice: number;
+      if (tradingEnv.DRY_RUN_MODE) {
+        sellPrice = simulateSellFillPrice(bestBid);
+      } else if (reason === "stop_loss") {
+        const tickSize = parseFloat(TICK_SIZE);
+        sellPrice = clampPrice(Math.max(bestBid - tickSize, tickSize));
+      } else {
+        sellPrice = clampPrice(Math.max(bestBid * 0.98, parseFloat(TICK_SIZE)));
+      }
+
+      if (reason === "stop_loss" && bestBid < 0.05) {
+        logger.warn(
+          `[StopLoss] Bid too low (${bestBid.toFixed(3)}) — no liquidity. Skipping sell, clearing for settlement.`
+        );
+        reduceHoldings(conditionId, tokenId, shares);
+        await store.setPosition(conditionId, null);
+        logTrade(`STOP_LOSS_NO_LIQ conditionId=${shortId(conditionId)} bid=${bestBid.toFixed(4)} — cleared for settlement`);
+        return true;
+      }
       const amount = Math.floor(shares * 100) / 100;
       if (amount <= 0) return false;
       const marketOrder = {
@@ -276,9 +291,11 @@ export async function sellToken(
       }
       logger.error("SELL: order not filled");
       return false;
-    } catch {
-      logger.error("SELL: order not filled");
-      logTrade(`SELL_FAIL conditionId=${shortId(conditionId)} side=${side} reason=${reason}`);
+    } catch (err: unknown) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      const errData = (err as { response?: { data?: unknown } })?.response?.data;
+      logger.error(`SELL: order not filled — ${errMsg}${errData ? ` | API: ${JSON.stringify(errData)}` : ""}`);
+      logTrade(`SELL_FAIL conditionId=${shortId(conditionId)} side=${side} reason=${reason} error=${errMsg}`);
       return false;
     }
   });

@@ -12,6 +12,8 @@ import { sendOrderResult } from "./telegram-reporter";
 import { logger, shortId } from "../logger";
 import * as store from "../utils/file-store";
 import { realizedPnlWin, realizedPnlLoss } from "./sim-math";
+import { redeemMarket } from "../utils/redeem";
+import { tradingEnv } from "../config/env";
 
 const INITIAL_POLL_DELAY_MS = 30_000;    
 const MAX_POLL_INTERVAL_MS = 600_000;   // Max 10 mins between polls
@@ -47,6 +49,21 @@ export async function forceInstantSettlement(
         const pnl = downWon
           ? realizedPnlWin(shares, principalToRedeem)
           : realizedPnlLoss(principalToRedeem);
+
+        // === Perform on-chain redemption before clearing state ===
+        if (downWon && tradingEnv.ENABLE_AUTO_REDEEM) {
+          try {
+            logger.info(`[Settlement] Redeeming winning position for ${shortId(conditionId)}...`);
+            await redeemMarket(conditionId);
+            logger.ok(`[Settlement] On-chain redemption success: ${shortId(conditionId)}`);
+          } catch (redeemErr) {
+            const redeemMsg = redeemErr instanceof Error ? redeemErr.message : String(redeemErr);
+            // Don't fail the entire settlement just because redeem failed; auto-redeem-service will retry
+            logger.error(`[Settlement] On-chain redeem failed (will retry via auto-redeem): ${redeemMsg}`);
+          }
+        }
+        // =========================================================
+
         adjustSimBalance(grossProceeds);
         
         logger.ok(

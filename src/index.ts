@@ -67,7 +67,11 @@ async function main(): Promise<void> {
           downTokenId,
         });
         const conditionId = (state?.conditionId as string) || "";
-        if (conditionId) logMarketPrices(conditionId, upTokenId, downTokenId, upPrice, downPrice);
+        if (conditionId) {
+          logMarketPrices(conditionId, upTokenId, downTokenId, upPrice, downPrice);
+          // Call monitor.onPriceUpdate for immediate Profit Lock / Stop Loss check
+          monitor.onPriceUpdate(upPrice, downPrice).catch(err => log.error("[onPriceUpdate] Error:", err));
+        }
       } catch (_) {}
     });
 
