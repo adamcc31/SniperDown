@@ -235,16 +235,19 @@ export async function sellToken(
       let sellPrice: number;
       if (tradingEnv.DRY_RUN_MODE) {
         sellPrice = simulateSellFillPrice(bestBid);
+      } else if (reason === "profit_lock") {
+        // Securing a 90% fill is better than a rejected order and 100% loss.
+        sellPrice = clampPrice(Math.max(bestBid * 0.90, parseFloat(TICK_SIZE)));
       } else if (reason === "stop_loss") {
-        const tickSize = parseFloat(TICK_SIZE);
-        sellPrice = clampPrice(Math.max(bestBid - tickSize, tickSize));
+        // Nuke: Dump at absolute minimum to sweep any bids.
+        sellPrice = parseFloat(TICK_SIZE);
       } else {
         sellPrice = clampPrice(Math.max(bestBid * 0.98, parseFloat(TICK_SIZE)));
       }
 
       if (reason === "stop_loss" && bestBid < 0.05) {
         logger.warn(
-          `[StopLoss] Bid too low (${bestBid.toFixed(3)}) — no liquidity. Skipping sell, clearing for settlement.`
+          `[StopLoss] Bid too low (${bestBid.toFixed(3)}). No liquidity. Allowing settlement to handle.`
         );
         reduceHoldings(conditionId, tokenId, shares);
         await store.setPosition(conditionId, null);

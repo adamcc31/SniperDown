@@ -35,6 +35,8 @@ export class WinMonitor {
   private lastConditionId: string | null = null;
   private isExecutingTrade = false;
   private isCheckingExit = false;
+  private lastExitAttemptTime = 0;
+  private readonly EXIT_COOLDOWN_MS = 2000;
 
   constructor(
     private polymarket: PolymarketClient,
@@ -208,6 +210,10 @@ export class WinMonitor {
       } else {
         const getBestBid = (tid: string) => this.realtimePriceService?.getBestBid(tid) ?? null;
         if (currentPrice >= profitLockPrice || currentPrice <= stopLossPrice) {
+          const now = Date.now();
+          if (now - this.lastExitAttemptTime < this.EXIT_COOLDOWN_MS) {
+            return;
+          }
           const reason = currentPrice >= profitLockPrice ? "profit_lock" : "stop_loss";
           
           const storedPrincipal = await store.getInvestedPrincipal(
@@ -216,6 +222,7 @@ export class WinMonitor {
           const costBasis = storedPrincipal ?? ((position.buyPrice * shares) || tradingEnv.BUY_AMOUNT_USD);
 
           logger.info(`Win: ${reason} ${currentPrice.toFixed(3)}, selling ${position.side}`);
+          this.lastExitAttemptTime = Date.now();
           const ok = await sellToken(
             position.tokenId,
             shares,
@@ -296,6 +303,10 @@ export class WinMonitor {
       const stopLossPrice = tradingEnv.STOP_LOSS_PRICE;
 
       if (currentPrice >= profitLockPrice || currentPrice <= stopLossPrice) {
+        const now = Date.now();
+        if (now - this.lastExitAttemptTime < this.EXIT_COOLDOWN_MS) {
+          return;
+        }
         const reason = currentPrice >= profitLockPrice ? "profit_lock" : "stop_loss";
         
         // Guard: avoid double-sell
@@ -311,6 +322,7 @@ export class WinMonitor {
         
         const eventSlug = await store.getEventSlug(conditionId) ?? "";
 
+        this.lastExitAttemptTime = Date.now();
         const ok = await sellToken(
           position.tokenId,
           shares,
