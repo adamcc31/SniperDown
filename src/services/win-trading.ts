@@ -233,16 +233,18 @@ export async function sellToken(
         return false;
       }
       let sellPrice: number;
+      const tick = parseFloat(TICK_SIZE) || 0.01;
+
       if (tradingEnv.DRY_RUN_MODE) {
         sellPrice = simulateSellFillPrice(bestBid);
       } else if (reason === "profit_lock") {
-        // Securing a 90% fill is better than a rejected order and 100% loss.
-        sellPrice = clampPrice(Math.max(bestBid * 0.90, parseFloat(TICK_SIZE)));
+        // 2 ticks (cents) below best bid. Aggressive enough to fill, safe enough to pass filters.
+        sellPrice = clampPrice(Math.max(bestBid - (tick * 2), tick));
       } else if (reason === "stop_loss") {
-        // Nuke: Dump at absolute minimum to sweep any bids.
-        sellPrice = parseFloat(TICK_SIZE);
+        // 3 ticks (cents) below best bid.
+        sellPrice = clampPrice(Math.max(bestBid - (tick * 3), tick));
       } else {
-        sellPrice = clampPrice(Math.max(bestBid * 0.98, parseFloat(TICK_SIZE)));
+        sellPrice = clampPrice(Math.max(bestBid - tick, tick));
       }
 
       if (reason === "stop_loss" && bestBid < 0.05) {
@@ -296,8 +298,11 @@ export async function sellToken(
       return false;
     } catch (err: unknown) {
       const errMsg = err instanceof Error ? err.message : String(err);
-      const errData = (err as { response?: { data?: unknown } })?.response?.data;
-      logger.error(`SELL: order not filled — ${errMsg}${errData ? ` | API: ${JSON.stringify(errData)}` : ""}`);
+      // Extract Axios/API data if it exists
+      const errData = (err as any)?.response?.data ?? (err as any)?.data ?? "";
+      const apiLog = errData ? ` | API Data: ${JSON.stringify(errData)}` : "";
+
+      logger.error(`SELL FAIL: ${errMsg}${apiLog}`);
       logTrade(`SELL_FAIL conditionId=${shortId(conditionId)} side=${side} reason=${reason} error=${errMsg}`);
       return false;
     }
