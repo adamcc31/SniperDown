@@ -8,7 +8,7 @@
 import { isMarketResolved } from "../utils/redeem";
 import { clearMarketHoldings } from "../utils/holdings";
 import { adjustSimBalance } from "./paper-ledger";
-import { sendOrderResult } from "./telegram-reporter";
+import { sendOrderResult, sendTelegram } from "./telegram-reporter";
 import { logger, shortId } from "../logger";
 import * as store from "../utils/file-store";
 import { realizedPnlWin, realizedPnlLoss } from "./sim-math";
@@ -84,6 +84,38 @@ export async function forceInstantSettlement(
           conditionId,
           eventSlug: eventSlug ?? ""
         });
+
+        // --- CIRCUIT BREAKER STREAK TRACKING ---
+        if (downWon) {
+          await store.setConsecutiveLosses(0);
+        } else {
+          const CONSECUTIVE_LOSS_LIMIT = 3;
+          const prevLosses = await store.getConsecutiveLosses();
+          const newLosses = prevLosses + 1;
+          await store.setConsecutiveLosses(newLosses);
+          if (newLosses >= CONSECUTIVE_LOSS_LIMIT) {
+            const now = new Date();
+            const nextDay = new Date(now);
+            nextDay.setUTCDate(nextDay.getUTCDate() + 1);
+            nextDay.setUTCHours(3, 0, 0, 0); // 10:00 WIB
+            const resumeTimestamp = Math.floor(nextDay.getTime() / 1000);
+            await store.setCircuitBreakerUntil(resumeTimestamp);
+
+            const resumeStr = nextDay.toISOString();
+            logger.warn(
+              `[CircuitBreaker] 🚨 ${CONSECUTIVE_LOSS_LIMIT} consecutive losses detected in settlement. ` +
+              `Bot suspended until ${resumeStr} (10:00 WIB).`
+            );
+            await sendTelegram(
+              `🚨 *CIRCUIT BREAKER TRIGGERED*\n\n` +
+              `Bot has suffered *${CONSECUTIVE_LOSS_LIMIT} consecutive losses*.\n` +
+              `Trading suspended automatically.\n\n` +
+              `⏰ *Resuming at:* 10:00 WIB tomorrow\n` +
+              `📅 *UTC Resume:* ${resumeStr}`
+            );
+          }
+        }
+        // --- END STREAK TRACKING ---
         
         // Final State Cleanup
         clearMarketHoldings(conditionId);

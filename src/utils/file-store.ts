@@ -16,6 +16,8 @@ export interface WinBotState {
   /** conditionIds where we already bought (one buy per market ever) */
   boughtConditionIds?: string[];
   investedPrincipal?: Record<string, number>;
+  consecutiveLosses?: number;
+  circuitBreakerUntil?: number | null;
 }
 
 function load(): WinBotState {
@@ -122,3 +124,26 @@ export async function addInvestedPrincipal(conditionId: string, amount: number):
   data.investedPrincipal[conditionId] = current + amount;
   save(data);
 }
+
+export async function getConsecutiveLosses(): Promise<number> {
+  const data = load();
+  return data.consecutiveLosses ?? 0;
+}
+
+export async function setConsecutiveLosses(count: number): Promise<void> {
+  const data = load();
+  data.consecutiveLosses = count;
+  save(data);
+}
+
+export async function getCircuitBreakerUntil(): Promise<number | null> {
+  const data = load();
+  return data.circuitBreakerUntil ?? null;
+}
+
+export async function setCircuitBreakerUntil(timestamp: number | null): Promise<void> {
+  const data = load();
+  data.circuitBreakerUntil = timestamp;
+  save(data);
+}
+

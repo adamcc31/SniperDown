@@ -15,7 +15,7 @@ import type { WinPosition, MarketInfo } from "../types";
 import type { RealtimePriceService } from "./realtime-price-service";
 import { checkLiquidity } from "../utils/liquidity-guard";
 import { forceInstantSettlement } from "./resolution-fallback";
-import { sendOrderResult } from "./telegram-reporter";
+import { sendOrderResult, sendTelegram } from "./telegram-reporter";
 import * as paperLedger from "../services/paper-ledger";
 import { simulateSellFillPrice, simulateGrossProceeds, realizedPnlFromClobExit } from "./sim-math";
 
@@ -48,6 +48,25 @@ export class WinMonitor {
   ) {}
 
   async processCycle(): Promise<void> {
+    // --- CIRCUIT BREAKER GUARD ---
+    const circuitBreakerUntil = await store.getCircuitBreakerUntil();
+    if (circuitBreakerUntil !== null) {
+      const nowSec = Math.floor(Date.now() / 1000);
+      if (nowSec < circuitBreakerUntil) {
+        const resumeTime = new Date(circuitBreakerUntil * 1000).toISOString();
+        logger.skip(
+          `[CircuitBreaker] Bot suspended after consecutive losses. ` +
+          `Resuming at ${resumeTime} (10:00 WIB).`
+        );
+        return;
+      } else {
+        await store.setCircuitBreakerUntil(null);
+        await store.setConsecutiveLosses(0);
+        logger.info(`[CircuitBreaker] Suspension lifted. Resuming normal operation.`);
+      }
+    }
+    // --- END CIRCUIT BREAKER GUARD ---
+
     // --- GOLDEN TRADING WINDOW FILTER (UTC+7 / WIB) ---
     const nowDate = new Date();
     const currentHourWIB = (nowDate.getUTCHours() + 7) % 24;
@@ -295,6 +314,39 @@ export class WinMonitor {
                 eventSlug: marketInfo.eventSlug,
               });
 
+              // --- CIRCUIT BREAKER STREAK TRACKING ---
+              const isWinTrade = realizedPnl >= 0;
+              if (isWinTrade) {
+                await store.setConsecutiveLosses(0);
+              } else {
+                const CONSECUTIVE_LOSS_LIMIT = 3;
+                const prevLosses = await store.getConsecutiveLosses();
+                const newLosses = prevLosses + 1;
+                await store.setConsecutiveLosses(newLosses);
+                if (newLosses >= CONSECUTIVE_LOSS_LIMIT) {
+                  const now = new Date();
+                  const nextDay = new Date(now);
+                  nextDay.setUTCDate(nextDay.getUTCDate() + 1);
+                  nextDay.setUTCHours(3, 0, 0, 0); // 10:00 WIB
+                  const resumeTimestamp = Math.floor(nextDay.getTime() / 1000);
+                  await store.setCircuitBreakerUntil(resumeTimestamp);
+
+                  const resumeStr = nextDay.toISOString();
+                  logger.warn(
+                    `[CircuitBreaker] 🚨 ${CONSECUTIVE_LOSS_LIMIT} consecutive losses detected. ` +
+                    `Bot suspended until ${resumeStr} (10:00 WIB).`
+                  );
+                  await sendTelegram(
+                    `🚨 *CIRCUIT BREAKER TRIGGERED*\n\n` +
+                    `Bot has suffered *${CONSECUTIVE_LOSS_LIMIT} consecutive losses*.\n` +
+                    `Trading suspended automatically.\n\n` +
+                    `⏰ *Resuming at:* 10:00 WIB tomorrow\n` +
+                    `📅 *UTC Resume:* ${resumeStr}`
+                  );
+                }
+              }
+              // --- END STREAK TRACKING ---
+
               // 3. Clear the position
               await store.setPosition(marketInfo.conditionId, null);
             } else {
@@ -420,6 +472,39 @@ export class WinMonitor {
               conditionId,
               eventSlug,
             });
+
+            // --- CIRCUIT BREAKER STREAK TRACKING ---
+            const isWinTrade = realizedPnl >= 0;
+            if (isWinTrade) {
+              await store.setConsecutiveLosses(0);
+            } else {
+              const CONSECUTIVE_LOSS_LIMIT = 3;
+              const prevLosses = await store.getConsecutiveLosses();
+              const newLosses = prevLosses + 1;
+              await store.setConsecutiveLosses(newLosses);
+              if (newLosses >= CONSECUTIVE_LOSS_LIMIT) {
+                const now = new Date();
+                const nextDay = new Date(now);
+                nextDay.setUTCDate(nextDay.getUTCDate() + 1);
+                nextDay.setUTCHours(3, 0, 0, 0); // 10:00 WIB
+                const resumeTimestamp = Math.floor(nextDay.getTime() / 1000);
+                await store.setCircuitBreakerUntil(resumeTimestamp);
+
+                const resumeStr = nextDay.toISOString();
+                logger.warn(
+                  `[CircuitBreaker] 🚨 ${CONSECUTIVE_LOSS_LIMIT} consecutive losses detected. ` +
+                  `Bot suspended until ${resumeStr} (10:00 WIB).`
+                );
+                await sendTelegram(
+                  `🚨 *CIRCUIT BREAKER TRIGGERED*\n\n` +
+                  `Bot has suffered *${CONSECUTIVE_LOSS_LIMIT} consecutive losses*.\n` +
+                  `Trading suspended automatically.\n\n` +
+                  `⏰ *Resuming at:* 10:00 WIB tomorrow\n` +
+                  `📅 *UTC Resume:* ${resumeStr}`
+                );
+              }
+            }
+            // --- END STREAK TRACKING ---
 
             await store.setPosition(conditionId, null);
           } else {

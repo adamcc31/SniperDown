@@ -46,6 +46,10 @@ async function _callTelegramApi(text: string): Promise<void> {
   }
 }
 
+export async function sendTelegram(message: string): Promise<void> {
+  await _callTelegramApi(message);
+}
+
 export async function sendStartPing() {
   const mode = tradingEnv.DRY_RUN_MODE ? "ON (Simulating)" : "OFF (Live Capital)";
   await _callTelegramApi(`🟢 *Down Sniper Initialized*\nMarket: \`${tradingEnv.POLYMARKET_SLUG_PREFIX}\`\nDry Run: *${mode}*`);
