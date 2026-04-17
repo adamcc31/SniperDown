@@ -48,6 +48,21 @@ export class WinMonitor {
   ) {}
 
   async processCycle(): Promise<void> {
+    // --- GOLDEN TRADING WINDOW FILTER (UTC+7 / WIB) ---
+    const now = new Date();
+    const currentHourWIB = (now.getUTCHours() + 7) % 24;
+
+    // Block new entries during the Dead Zone: 04:00–09:59 WIB
+    // This corresponds to 21:00–02:59 UTC (post-US close, pre-Asia open)
+    if (currentHourWIB >= 4 && currentHourWIB < 10) {
+      logger.skip(
+        `[Time Filter] Dead Zone. Current WIB hour: ${currentHourWIB}. ` +
+        `Waiting for Golden Window at 10:00 WIB.`
+      );
+      return;
+    }
+    // --- END FILTER ---
+
     const enabled = await store.getEnabled();
     if (!enabled) return;
 
